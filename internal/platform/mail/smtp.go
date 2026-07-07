@@ -110,12 +110,19 @@ func authFor(c *smtp.Client, host, user, pass string) (smtp.Auth, error) {
 	}
 }
 
+// headerSafe strips CR/LF so an address can never smuggle extra headers into the message.
+// net/smtp already rejects CR/LF in the envelope (Mail/Rcpt), so this is defense-in-depth
+// for the header section built here.
+func headerSafe(s string) string {
+	return strings.NewReplacer("\r", "", "\n", "").Replace(s)
+}
+
 // buildMessage renders the RFC 5322 message bytes (headers + text/plain or text/html or
 // multipart/alternative when both bodies are present).
 func buildMessage(from string, m Message) []byte {
 	var b strings.Builder
-	b.WriteString("From: " + from + "\r\n")
-	b.WriteString("To: " + strings.Join(m.To, ", ") + "\r\n")
+	b.WriteString("From: " + headerSafe(from) + "\r\n")
+	b.WriteString("To: " + headerSafe(strings.Join(m.To, ", ")) + "\r\n")
 	b.WriteString("Subject: " + mime.QEncoding.Encode("UTF-8", m.Subject) + "\r\n")
 	b.WriteString("Date: " + time.Now().UTC().Format(time.RFC1123Z) + "\r\n")
 	b.WriteString("MIME-Version: 1.0\r\n")

@@ -44,6 +44,15 @@ export default function MorePage() {
     userEmail: auth.user?.profile.email,
   })
 
+  // The URL is operator-configured, but only ever render web URLs — never javascript: etc.
+  if (!/^https?:\/\//i.test(url)) {
+    return (
+      <>
+        <PageHeader title="Not available" description="This menu item is not configured." />
+      </>
+    )
+  }
+
   if ((item.renderMode ?? "IFRAME").toUpperCase() !== "IFRAME") {
     return (
       <>
