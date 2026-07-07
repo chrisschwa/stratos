@@ -56,11 +56,10 @@ Each domain registers its own `Routes()` under `/api/v1` (see `AppRouter` in
 | `features` | Available feature set |
 | `promotion` / `affiliate` | Deposit promos, affiliate program |
 | `catalog` | Cloud catalog (flavor categories, image groups) |
-| `livechat` | Marketing live-chat integration |
 | `order` / `project-invites` | Orders and project invitations |
 | `admin/**` | Operator console surface (permission-gated) |
 | `streaming` | SSE real-time event stream (`/events/{projectId}`) |
-| `os-notification`, `callbacks`, `payments`, `webhooks`, `digio/webhooks` | Inbound webhooks (public whitelist) |
+| `os-notification`, `callbacks`, `payments`, `webhooks` | Inbound webhooks (public whitelist) |
 
 ## Admin API — `/admin-api/v1`
 

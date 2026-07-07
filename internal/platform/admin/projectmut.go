@@ -350,7 +350,7 @@ func (h *Handler) projectUnassociatedOsProjects(w http.ResponseWriter, r *http.R
 	}
 	if h.cloudNew == nil {
 		httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
-			"listUnassociatedOsProjects (keystone) not implemented"))
+			"listing unassociated OpenStack projects not implemented"))
 		return
 	}
 	cc, err := h.cloudClient(r.Context(), es, h.serviceRegions(es)[0])
@@ -431,7 +431,7 @@ func (h *Handler) projectAddExternalService(w http.ResponseWriter, r *http.Reque
 	}
 	if h.projectCloud == nil || h.projectCloud.Bootstrap == nil {
 		httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
-			"addExternalServiceToProject (bootstrap/provision) not implemented"))
+			"attaching a cloud provider to a project not implemented"))
 		return
 	}
 	if err := h.projectCloud.Bootstrap(r.Context(), id, esID, ""); err != nil {
@@ -470,7 +470,7 @@ func (h *Handler) projectSync(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.projectCloud == nil || h.projectCloud.Sync == nil {
 		httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
-			"syncProject (OpenStack sync) not implemented"))
+			"project cloud sync not implemented"))
 		return
 	}
 	if err := h.projectCloud.Sync(r.Context(), id, r.URL.Query().Get("serviceId")); err != nil {
@@ -569,7 +569,7 @@ func (h *Handler) projectUpdateStatus(w http.ResponseWriter, r *http.Request) {
 			// Cloud leg unwired (tests / degraded boot) → 501; the status is set only after the
 			// cloud call, so nothing persists.
 			httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
-				fmt.Sprintf("onProject%s not implemented", suspendResumeOp(status))))
+				fmt.Sprintf("project %s not implemented", suspendResumeOp(status))))
 			return
 		}
 		before := maps.Clone(existing)
@@ -622,9 +622,9 @@ func (h *Handler) projectUpdateStatus(w http.ResponseWriter, r *http.Request) {
 
 func suspendResumeOp(status string) string {
 	if status == "ENABLED" {
-		return "Resume"
+		return "resume"
 	}
-	return "Suspend"
+	return "suspend"
 }
 
 func isValidProjectStatus(s string) bool {
@@ -665,7 +665,7 @@ func (h *Handler) projectScheduleDeletion(w http.ResponseWriter, r *http.Request
 	// BEFORE any persist.
 	if h.projectCloud == nil || h.projectCloud.CanDelete == nil {
 		httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
-			"scheduleProjectDeletion (canProjectBeDeleted cloud check) not implemented"))
+			"project deletion scheduling (cloud eligibility check) not implemented"))
 		return
 	}
 	if err := h.projectCloud.CanDelete(r.Context(), id); httpx.WriteError(w, err) {
@@ -699,7 +699,7 @@ func (h *Handler) projectDeleteNow(w http.ResponseWriter, r *http.Request) {
 	// the status flip (so a degraded boot never orphans a project in DELETE_IN_PROGRESS with no job).
 	if h.projectCloud == nil || h.projectCloud.Teardown == nil {
 		httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
-			"executeProjectDeletion (async cloud teardown) not implemented"))
+			"project deletion (cloud teardown) not implemented"))
 		return
 	}
 	// status=DELETE_IN_PROGRESS, persisted (the faithful effect before dispatching the teardown).
