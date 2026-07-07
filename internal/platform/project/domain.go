@@ -148,11 +148,22 @@ func svcField(svc any, key string) string {
 }
 
 // ExternalProjectID returns the provisioned OpenStack tenant id (externalProjectId) for the given
-// external service, or "" when the project is not (yet) bootstrapped on it.
+// external service, or "" when the project is not (yet) bootstrapped on it. Bulk-imported
+// projects carry the tenant under config.openstackProjectId instead (the import shape) —
+// read that as the fallback so sync/tenant-scoping work for both shapes.
 func (p *Project) ExternalProjectID(serviceID string) string {
 	for _, svc := range p.Services {
 		if svcField(svc, "serviceId") == serviceID {
-			return svcField(svc, "externalProjectId")
+			if id := svcField(svc, "externalProjectId"); id != "" {
+				return id
+			}
+			if t, ok := svc.(map[string]any); ok {
+				if cfg, ok := t["config"].(map[string]any); ok {
+					s, _ := cfg["openstackProjectId"].(string)
+					return s
+				}
+			}
+			return ""
 		}
 	}
 	return ""

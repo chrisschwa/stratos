@@ -276,14 +276,20 @@ func projectImportExternalServiceID(es pgdoc.M, fallback string) string {
 func projectImportNewProjectDoc(p *openStackImportProject, serviceID string) pgdoc.M {
 	projectExternalService := pgdoc.M{
 		"serviceId": serviceID,
-		"config":    pgdoc.M{"openstackProjectId": p.ID},
+		// externalProjectId is what sync/tenant-scoping read (the bootstrap shape);
+		// config.openstackProjectId is the legacy import shape kept for compatibility.
+		"externalProjectId": p.ID,
+		"config":            pgdoc.M{"openstackProjectId": p.ID},
 	}
+	now := time.Now().UTC()
 	doc := pgdoc.M{
 		"name":        p.Name,
 		"status":      "ENABLED",
 		"memberships": []any{},
 		"services":    []any{projectExternalService},
 		"customInfo":  pgdoc.M{},
+		"createdAt":   now,
+		"updatedAt":   now,
 	}
 	return doc
 }
