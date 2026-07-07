@@ -3,6 +3,7 @@ package billing
 import (
 	_ "embed"
 	"encoding/json"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +53,9 @@ func Countries() []Country {
 			n, _ := strconv.Atoi(s)
 			countries = append(countries, Country{Name: c.Name.Common, Alpha2: c.Cca2, Alpha3: c.Cca3, Numeric: n})
 		}
+		// Alphabetical by name — the dataset ships in an arbitrary order, and every
+		// consumer (the billing country picker) wants it A→Z.
+		sort.Slice(countries, func(i, j int) bool { return countries[i].Name < countries[j].Name })
 	})
 	return countries
 }

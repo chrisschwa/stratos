@@ -15,6 +15,7 @@ import { Label } from "@/components/ui/label"
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
+import { Combobox } from "@/components/ui/combobox"
 import { Skeleton } from "@/components/ui/skeleton"
 import { apiFetch } from "@/lib/api"
 import { fmtMoney } from "@/lib/format"
@@ -395,18 +396,13 @@ function BillingDetailsCard({ bp, onSaved }: { bp: string; onSaved: () => void }
           <Field label="Last name"><Input value={form.lastName} onChange={set("lastName")} /></Field>
           <Field label="Phone"><Input placeholder="+1 555 0100" value={form.phone} onChange={set("phone")} /></Field>
           <Field label="Country">
-            <Select value={form.country} onValueChange={(v) => setForm((f) => ({ ...f, country: v }))}>
-              <SelectTrigger className="w-full">
-                <SelectValue placeholder="Select country" />
-              </SelectTrigger>
-              <SelectContent>
-                {(countries ?? []).map((c) => (
-                  <SelectItem key={c.cca2} value={c.cca2}>
-                    {c.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <Combobox
+              options={(countries ?? []).map((c) => ({ value: c.cca2, label: c.name }))}
+              value={form.country}
+              onValueChange={(v) => setForm((f) => ({ ...f, country: v }))}
+              placeholder="Select country"
+              searchPlaceholder="Search country…"
+            />
           </Field>
           <Field label="Street address"><Input value={form.address} onChange={set("address")} /></Field>
           <Field label="City"><Input value={form.city} onChange={set("city")} /></Field>
