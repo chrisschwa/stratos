@@ -43,6 +43,9 @@ jobs:
       - name: Lint + template
         run: |
           set -euo pipefail
+          # dependency build resolves the classic (non-OCI) repos only if they are configured
+          helm repo add codecentric https://codecentric.github.io/helm-charts
+          helm repo add cnpg https://cloudnative-pg.github.io/charts
           helm dependency build "$CHART_DIR"
           helm lint "$CHART_DIR"
           helm template "$CHART_DIR" >/dev/null
@@ -70,6 +73,9 @@ jobs:
             echo "chart $CHART_NAME $version already published — nothing to do."
             exit 0
           fi
+          # dependency build resolves the classic (non-OCI) repos only if they are configured
+          helm repo add codecentric https://codecentric.github.io/helm-charts
+          helm repo add cnpg https://cloudnative-pg.github.io/charts
           helm dependency build "$CHART_DIR"
           helm lint "$CHART_DIR"
           helm template "$CHART_DIR" >/dev/null
