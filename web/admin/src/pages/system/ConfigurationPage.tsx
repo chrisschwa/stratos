@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -32,6 +33,9 @@ type BillingConfig = {
   defaultConfiguration?: boolean
 }
 
+type ServiceItem = { id: string; name?: string; config?: { regions?: Record<string, unknown> } }
+type Currency = { currency_code: string; currency_name: string }
+
 const PLATFORM_PATH = "/admin/platform-configuration/current"
 const BILLING_PATH = "/admin/billing/configuration/current"
 
@@ -54,7 +58,8 @@ export default function ConfigurationPage() {
 
   const [form, setForm] = useState<PlatformForm | null>(null)
   useEffect(() => {
-    if (cfg && !form) {
+    // cfg.id guard: an empty envelope ({} — nothing stored yet) unwraps to a truthy object.
+    if (cfg?.id && !form) {
       setForm({
         name: cfg.name ?? "",
         brandingName: cfg.branding?.name ?? "",
@@ -92,6 +97,51 @@ export default function ConfigurationPage() {
     onError: (e) => toast.error((e as Error).message),
   })
 
+  // Regions display config ({serviceId, region, order} rows) — PUT /{id}/regions replaces the
+  // whole list, so add/remove rebuild it and reindex order by position.
+  const servicesQ = useAdminGet<ServiceItem[]>("/admin/service")
+  const [regSvc, setRegSvc] = useState("")
+  const [regName, setRegName] = useState("")
+  const saveRegions = useMutation({
+    mutationFn: (regions: Array<{ serviceId: string; region: string; order: number }>) =>
+      apiFetch(`/admin/platform-configuration/${cfg?.id}/regions`, { method: "PUT", body: regions }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin-get", PLATFORM_PATH] })
+      toast.success("Regions saved")
+    },
+    onError: (e) => toast.error((e as Error).message),
+  })
+  const regionOptions = Object.keys(servicesQ.data?.find((s) => s.id === regSvc)?.config?.regions ?? {}).sort()
+  const reindex = (rows: Array<{ serviceId: string; region: string; order: number }>) =>
+    rows.map((r, i) => ({ ...r, order: i + 1 }))
+  const addRegion = () => {
+    const cur = cfg?.regions ?? []
+    if (cur.some((r) => r.serviceId === regSvc && r.region === regName)) {
+      toast.error("Region already configured")
+      return
+    }
+    saveRegions.mutate(reindex([...cur, { serviceId: regSvc, region: regName, order: cur.length + 1 }]))
+    setRegName("")
+  }
+
+  // Billing config: a fresh install has none — offer create (base currency + promo toggle).
+  // Editing an EXISTING config stays disabled (partial read + replace-all update would wipe fields).
+  const currenciesQ = useAdminGet<Currency[]>("/admin/billing/configuration/currencies", !billingQ.data?.id)
+  const [newCurrency, setNewCurrency] = useState("")
+  const [newPromo, setNewPromo] = useState(false)
+  const createBilling = useMutation({
+    mutationFn: () =>
+      apiFetch("/admin/billing/configuration", {
+        method: "POST",
+        body: { baseCurrency: newCurrency, promotionCodesEnabled: newPromo, defaultConfiguration: true },
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin-get", BILLING_PATH] })
+      toast.success("Billing configuration created")
+    },
+    onError: (e) => toast.error((e as Error).message),
+  })
+
   return (
     <>
       <PageHeader title="Configuration" description="Platform branding, formats, quota and billing basics." />
@@ -108,7 +158,7 @@ export default function ConfigurationPage() {
               <div className="rounded-lg border bg-muted/40 p-4 text-sm text-muted-foreground">
                 {(platformQ.error as Error).message}
               </div>
-            ) : !cfg || !form ? (
+            ) : !cfg?.id || !form ? (
               <p className="text-sm text-muted-foreground">No platform configuration found.</p>
             ) : (
               <div className="space-y-4">
@@ -183,7 +233,7 @@ export default function ConfigurationPage() {
                   </div>
                 </div>
 
-                <div>
+                <div className="space-y-3">
                   <Label className="mb-2 block">Regions</Label>
                   {(cfg.regions ?? []).length === 0 ? (
                     <p className="text-sm text-muted-foreground">No regions configured.</p>
@@ -195,20 +245,74 @@ export default function ConfigurationPage() {
                             <TableHead>Service</TableHead>
                             <TableHead>Region</TableHead>
                             <TableHead>Order</TableHead>
+                            <TableHead />
                           </TableRow>
                         </TableHeader>
                         <TableBody>
                           {(cfg.regions ?? []).map((r, i) => (
                             <TableRow key={i}>
-                              <TableCell className="font-mono text-xs">{r.serviceId}</TableCell>
+                              <TableCell className="font-mono text-xs">
+                                {servicesQ.data?.find((s) => s.id === r.serviceId)?.name ?? r.serviceId}
+                              </TableCell>
                               <TableCell>{r.region}</TableCell>
                               <TableCell className="tabular-nums">{r.order}</TableCell>
+                              <TableCell className="text-right">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  disabled={saveRegions.isPending}
+                                  onClick={() => saveRegions.mutate(reindex((cfg.regions ?? []).filter((_, idx) => idx !== i)))}
+                                >
+                                  Remove
+                                </Button>
+                              </TableCell>
                             </TableRow>
                           ))}
                         </TableBody>
                       </Table>
                     </Card>
                   )}
+                  <div className="flex flex-wrap items-end gap-3">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-muted-foreground">Cloud provider</Label>
+                      <Select
+                        value={regSvc}
+                        onValueChange={(v) => {
+                          setRegSvc(v)
+                          setRegName("")
+                        }}
+                      >
+                        <SelectTrigger className="w-56">
+                          <SelectValue placeholder="Select provider" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {(servicesQ.data ?? []).map((s) => (
+                            <SelectItem key={s.id} value={s.id}>
+                              {s.name ?? s.id}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-muted-foreground">Region</Label>
+                      <Select value={regName} onValueChange={setRegName} disabled={!regSvc || regionOptions.length === 0}>
+                        <SelectTrigger className="w-48">
+                          <SelectValue placeholder={regSvc && regionOptions.length === 0 ? "No regions on provider" : "Select region"} />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {regionOptions.map((r) => (
+                            <SelectItem key={r} value={r}>
+                              {r}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <Button variant="outline" onClick={addRegion} disabled={!regSvc || !regName || saveRegions.isPending}>
+                      {saveRegions.isPending ? "Saving…" : "Add region"}
+                    </Button>
+                  </div>
                 </div>
 
                 <Button onClick={() => save.mutate()} disabled={save.isPending}>
@@ -230,8 +334,36 @@ export default function ConfigurationPage() {
               <div className="rounded-lg border bg-muted/40 p-4 text-sm text-muted-foreground">
                 {(billingQ.error as Error).message}
               </div>
-            ) : !billingQ.data ? (
-              <p className="text-sm text-muted-foreground">No billing configuration found.</p>
+            ) : !billingQ.data?.id ? (
+              <div className="space-y-4">
+                <p className="text-sm text-muted-foreground">
+                  No billing configuration yet — pick a base currency to create the default one.
+                </p>
+                <div className="flex flex-wrap items-end gap-3">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-muted-foreground">Base currency</Label>
+                    <Select value={newCurrency} onValueChange={setNewCurrency}>
+                      <SelectTrigger className="w-72">
+                        <SelectValue placeholder="Select currency" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(currenciesQ.data ?? []).map((c) => (
+                          <SelectItem key={c.currency_code} value={c.currency_code}>
+                            {c.currency_code} — {c.currency_name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex items-center gap-2 pb-2">
+                    <Switch checked={newPromo} onCheckedChange={setNewPromo} />
+                    <span className="text-sm">Promotion codes</span>
+                  </div>
+                  <Button onClick={() => createBilling.mutate()} disabled={!newCurrency || createBilling.isPending}>
+                    {createBilling.isPending ? "Creating…" : "Create billing configuration"}
+                  </Button>
+                </div>
+              </div>
             ) : (
               <div className="space-y-3">
                 <div className="flex items-center justify-between border-b py-2 text-sm">

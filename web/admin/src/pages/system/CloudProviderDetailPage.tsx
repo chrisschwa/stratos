@@ -453,7 +453,15 @@ function QuotaTab({ id, provider }: TabProps) {
     const next: Obj = { ...quota }
     for (const k of QUOTA_KEYS) {
       const v = vals[k].trim()
-      if (v !== "") next[k] = Number(v)
+      if (v !== "") {
+        const parsed = Number(v)
+        // NaN is dropped by JSON serialization — the key would silently keep its old value.
+        if (!Number.isFinite(parsed)) {
+          toast.error(`Invalid quota value for "${k}"`)
+          return
+        }
+        next[k] = parsed
+      }
     }
     save.mutate({ path: `/admin/service/${id}/quota`, body: next })
   }
@@ -559,7 +567,14 @@ function AdvancedTab({ id, provider }: TabProps) {
             <Input id="gran" type="number" value={gran} onChange={(e) => setGran(e.target.value)} />
           </div>
           <Button
-            onClick={() => save.mutate({ path: `/admin/service/${id}/gnocchi-granularity`, body: { granularity: Number(gran) || 0 } })}
+            onClick={() => {
+              const parsed = Number(gran)
+              if (!Number.isInteger(parsed) || parsed <= 0) {
+                toast.error("Granularity must be a positive integer")
+                return
+              }
+              save.mutate({ path: `/admin/service/${id}/gnocchi-granularity`, body: { granularity: parsed } })
+            }}
             disabled={save.isPending}
           >
             {save.isPending ? "Saving…" : "Save granularity"}
@@ -990,7 +1005,7 @@ export default function CloudProviderDetailPage() {
     return (
       <>
         <PageHeader title="Cloud provider" />
-        <Note>{(error as Error | undefined)?.message ?? "Cloud provider is not found."}</Note>
+        <Note>{(error as Error | undefined)?.message ?? "Failed to load cloud provider."}</Note>
       </>
     )
   }

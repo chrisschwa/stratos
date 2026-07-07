@@ -83,10 +83,12 @@ type Claims struct {
 	Issuer     string
 }
 
+// Repo provides persistence operations for User documents in the `users` collection.
 type Repo struct {
 	col *pgdoc.Store
 }
 
+// NewRepo constructs a user repository backed by the `users` collection.
 func NewRepo(db *pgdoc.DB) *Repo {
 	return &Repo{col: db.C("users")}
 }
@@ -181,8 +183,10 @@ func (r *Repo) FromClaims(ctx context.Context, c Claims) (*User, error) {
 		u.ID = id
 		return u, nil
 	}
-	// Refresh email/name from claims if changed (updated on each resolve).
-	set := pgdoc.M{"updatedAt": now}
+	// Refresh email/name from claims if changed; skip the write entirely when nothing
+	// changed — FromClaims runs on every request and an unconditional updatedAt bump
+	// would issue a users UPDATE per API call.
+	set := pgdoc.M{}
 	if c.Email != "" && c.Email != existing.Email {
 		set["email"] = c.Email
 		existing.Email = c.Email
@@ -195,10 +199,13 @@ func (r *Repo) FromClaims(ctx context.Context, c Claims) (*User, error) {
 		set["lastName"] = c.FamilyName
 		existing.LastName = c.FamilyName
 	}
-	if _, err := r.col.SetFieldsOne(ctx, pgdoc.M{"sub": c.Sub}, set, nil); err != nil {
-		return nil, err
+	if len(set) > 0 {
+		set["updatedAt"] = now
+		if _, err := r.col.SetFieldsOne(ctx, pgdoc.M{"sub": c.Sub}, set, nil); err != nil {
+			return nil, err
+		}
+		existing.UpdatedAt = &now
 	}
-	existing.UpdatedAt = &now
 	return existing, nil
 }
 

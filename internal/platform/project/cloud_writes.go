@@ -1231,9 +1231,7 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 		}
 		if cr != nil {
 			cr.Data = map[string]any{"server": srv, "instanceMetadata": serverMetadataMap(srv)}
-			if saved, e := h.cloud.Insert(r.Context(), cr); e == nil {
-				cr = saved
-			}
+			_, _ = h.cloud.Insert(r.Context(), cr) // best-effort cache refresh
 		}
 		httpx.OK(w, map[string]any{"result": map[string]any{"server": srv}})
 		return

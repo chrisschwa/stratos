@@ -106,8 +106,9 @@ func (r *Repo) ByIDAdminConfiguration(ctx context.Context, id string) (*AdminDto
 	return &dto, nil
 }
 
-// CurrentAdminConfiguration returns the default config (else first); the seeded env always
-// has one, so the create branch never runs. (nil,nil) when none.
+// CurrentAdminConfiguration returns the default config (else first). A fresh install has
+// none — then the create branch runs: insert an empty default config and return it, so the
+// admin config page always has a real id to save against.
 func (r *Repo) CurrentAdminConfiguration(ctx context.Context) (*AdminDto, error) {
 	var doc adminConfigDoc
 	found, err := r.col.FindOne(ctx, pgdoc.M{"defaultConfiguration": true}, &doc)
@@ -116,9 +117,16 @@ func (r *Repo) CurrentAdminConfiguration(ctx context.Context) (*AdminDto, error)
 	}
 	if !found {
 		found, err = r.col.FindOne(ctx, pgdoc.M{}, &doc)
-		if err != nil || !found {
+		if err != nil {
 			return nil, err
 		}
+	}
+	if !found {
+		id, err := r.col.InsertOne(ctx, pgdoc.M{"defaultConfiguration": true})
+		if err != nil {
+			return nil, err
+		}
+		doc = adminConfigDoc{ID: id, DefaultConfiguration: true}
 	}
 	dto := doc.toAdminDto()
 	return &dto, nil

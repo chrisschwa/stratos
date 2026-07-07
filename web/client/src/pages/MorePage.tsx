@@ -40,7 +40,7 @@ export default function MorePage() {
   const url = substituteUrlVariables(item.url, {
     projectId: pid,
     billingProfileId: summary?.id as string | undefined,
-    billingProfileEmail: (summary?.email as string | undefined) ?? undefined,
+    billingProfileEmail: summary?.email as string | undefined,
     userEmail: auth.user?.profile.email,
   })
 
