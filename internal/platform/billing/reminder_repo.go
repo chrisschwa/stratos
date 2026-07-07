@@ -33,8 +33,8 @@ func (r *Repo) SavingsContractReminderDays(ctx context.Context) ([]int, error) {
 	return cfg.Notif.ReminderDaysBeforeExpiry, nil
 }
 
-// ActiveSavingsContractsEndingBefore = findByStatusAndEndDateBefore(ACTIVE, threshold): ACTIVE
-// contracts whose endDate is strictly before the threshold (the send-expiry-reminders window).
+// ActiveSavingsContractsEndingBefore returns the ACTIVE contracts whose endDate is strictly before
+// the threshold (the send-expiry-reminders window).
 func (r *Repo) ActiveSavingsContractsEndingBefore(ctx context.Context, threshold time.Time) ([]SavingsContract, error) {
 	return findTyped[SavingsContract](ctx, r.savingCtrs, pgdoc.M{
 		"status":  SavingsStatusActive,
@@ -42,8 +42,8 @@ func (r *Repo) ActiveSavingsContractsEndingBefore(ctx context.Context, threshold
 	})
 }
 
-// ExistsInProgressReminder = existsByResourceTypeAndTargetResourceIdAndStatus(…, IN_PROGRESS) — the
-// dedup gate for scheduling.
+// ExistsInProgressReminder reports whether an IN_PROGRESS reminder already exists for the given
+// resource — the dedup gate for scheduling.
 func (r *Repo) ExistsInProgressReminder(ctx context.Context, resourceType, targetID string) (bool, error) {
 	return r.reminders.Exists(ctx, pgdoc.M{
 		"resourceType": resourceType, "targetResourceId": targetID, "status": ReminderStatusInProgress,
@@ -79,7 +79,7 @@ func (r *Repo) ScheduleReminder(ctx context.Context, resourceType, targetID, tem
 	return true, nil
 }
 
-// FindInProgressReminders = findByStatus(IN_PROGRESS).
+// FindInProgressReminders returns every reminder still in the IN_PROGRESS status.
 func (r *Repo) FindInProgressReminders(ctx context.Context) ([]ReminderNotification, error) {
 	return findTyped[ReminderNotification](ctx, r.reminders, pgdoc.M{"status": ReminderStatusInProgress})
 }

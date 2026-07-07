@@ -12,30 +12,29 @@ import (
 )
 
 // imagegroup.go serves the MUTATIONS + the missing reads of the images surface
-// (/api/v1/admin/images). The bare category list (GET /images/categories →
-// getAllCategories) is ALREADY registered in handler.go (listRaw
-// "imageCategory") and is intentionally NOT re-registered here.
+// (/api/v1/admin/images). The bare category list (GET /images/categories) is ALREADY registered
+// in handler.go (listRaw "imageCategory") and is intentionally NOT re-registered here.
 //
 // This surface is pure datastore CRUD over two tables — NO cloud / OpenStack calls — so
 // there is nothing left unwired. ImageCategory + ImageGroup are plain document domains saved/read via the
-// id-aware crud.go helpers; the handler returns the RAW domain via
-// single / list, so shapeDoc (_id→id, drop _class) gives the faithful JSON.
+// id-aware crud.go helpers; the handler returns the RAW domain, so shapeDoc (_id→id, drop _class)
+// gives the faithful JSON.
 //
-// Every endpoint gates on AdminPermissionEnum.ADMIN_IMAGE_GROUP_MANAGE → admin:image_group:manage.
+// Every endpoint gates on the admin:image_group:manage permission.
 //
-// create/update/delete on both services write audit events (
+// create/update/delete on both domains should write audit events (
 // IMAGE_CATEGORY / IMAGE_GROUP) — deferred this pass (// TODO(audit)); the persisted state + the
 // response envelope are faithful, which is what the admin UI exercises.
 //
-// Faithfulness notes on the `save()` semantics:
-//   - createCategory/createGroup: save() of the request body with no id → the datastore assigns the id
-//     (InsertDoc strips any id/_id). single(saved).
-//   - updateCategory/updateGroup: the handler IGNORES the path {id} and just save()s the
-//     request body. save() = upsert keyed by the body's `id`. We mirror that with the
-//     path id (the FE sends a matching id) as the document key — a full replace, NOT a $set merge
-//     (an omitted body field becomes null on the entity, dropped from the JSON). single(saved).
-//   - deleteCategory CASCADES: getGroupsByCategoryId(id) → deleteImageGroup(each), then
-//     deleteById(id). delete is `void` → HTTP 200 with an EMPTY body.
+// Faithfulness notes on the write semantics:
+//   - create (category/group): store the request body with no id → the datastore assigns the id
+//     (InsertDoc strips any id/_id). Returns the saved doc.
+//   - update (category/group): the handler IGNORES the path {id} and just stores the request body
+//     as an upsert keyed by the path id (the FE sends a matching id) — a full replace, NOT a
+//     partial-field merge (an omitted body field becomes absent, dropped from the JSON). Returns
+//     the saved doc.
+//   - delete (category) CASCADES: load the category's groups → delete each group, then delete the
+//     category by id. Returns no body → HTTP 200 with an EMPTY body.
 
 const imageGroupPerm = "admin:image_group:manage"
 
@@ -66,7 +65,7 @@ func (h *Handler) routeImageGroup(r chi.Router) {
 }
 
 // imageCategoryReq is the ImageCategory domain's mutable fields (request body). The id is the
-// optional body id used by save() (we key the upsert by the path id on update). bareMetal
+// optional body id used on write (we key the upsert by the path id on update). bareMetal
 // is a primitive bool → always emitted; name/description are nullable strings → omitted
 // when blank so the JSON drops them (a null field is dropped, not emitted as "").
 type imageCategoryReq struct {
@@ -91,8 +90,8 @@ func (req imageCategoryReq) doc() pgdoc.M {
 
 // imageGroupReq is the ImageGroup domain's mutable fields (request body). enabled/orderNumber
 // are primitives → always emitted; the nullable strings + the labels/images lists are omitted when
-// blank/nil. labels/images pass through as raw sub-docs (ImageGroupLabel{label,
-// description,color} / ImageGroupDescription{name,version,orderNumber}).
+// blank/nil. labels/images pass through as raw sub-docs ({label,description,color} /
+// {name,version,orderNumber}).
 type imageGroupReq struct {
 	ID           string               `json:"id"`
 	Name         string               `json:"name"`
@@ -105,14 +104,14 @@ type imageGroupReq struct {
 	Images       []imageGroupImageReq `json:"images"`
 }
 
-// imageGroupLabelReq is ImageGroupLabel (a nested sub-doc, no id).
+// imageGroupLabelReq is a nested label sub-doc (no id).
 type imageGroupLabelReq struct {
 	Label       string `json:"label"`
 	Description string `json:"description"`
 	Color       string `json:"color"`
 }
 
-// imageGroupImageReq is ImageGroupDescription (a nested sub-doc, no id). orderNumber is a
+// imageGroupImageReq is a nested image sub-doc (no id). orderNumber is a
 // primitive int → always stored.
 type imageGroupImageReq struct {
 	Name        string `json:"name"`
@@ -148,7 +147,7 @@ func (req imageGroupReq) doc() pgdoc.M {
 
 // --- ImageCategory handlers ---
 
-// imageCategoryCreate handles createCategory: save(body) → single(saved).
+// imageCategoryCreate stores the request body as a new category and returns the saved doc.
 func (h *Handler) imageCategoryCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, imageGroupPerm) {
 		return
@@ -162,11 +161,11 @@ func (h *Handler) imageCategoryCreate(w http.ResponseWriter, r *http.Request) {
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): logAsync(adminEvent CREATE IMAGE_CATEGORY saved.id saved.name SUCCESS)
+	// TODO(audit): write a CREATE IMAGE_CATEGORY admin audit event.
 	httpx.OK(w, shapeDoc(saved))
 }
 
-// imageCategoryGet handles getCategory: findById(id).orElseThrow(notFound "Image category not found").
+// imageCategoryGet loads a category by id; 404 "Image category not found" if absent.
 func (h *Handler) imageCategoryGet(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, imageGroupPerm) {
 		return
@@ -182,10 +181,9 @@ func (h *Handler) imageCategoryGet(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, shapeDoc(doc))
 }
 
-// imageCategoryUpdate handles updateCategory: the handler IGNORES the path {id} and save()s the
-// request body (upsert by body id). We key the full replace by the path id (the FE sends
-// a matching id); an omitted body field becomes null on the entity (dropped) — so this is a
-// full overwrite, not a $set merge. single(saved).
+// imageCategoryUpdate IGNORES the request body's own id and upserts the category, keyed by the
+// path id (the FE sends a matching id); an omitted body field becomes absent (dropped) — so this
+// is a full overwrite, not a partial-field merge. Returns the saved doc.
 func (h *Handler) imageCategoryUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, imageGroupPerm) {
 		return
@@ -200,7 +198,7 @@ func (h *Handler) imageCategoryUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.imageUpsert(r.Context(), imageCategoryCollection, id, req.doc()); httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE IMAGE_CATEGORY: field-level diff (middleware computes diffSnapshots(before, after)).
+	// UPDATE IMAGE_CATEGORY: field-level diff (the middleware diffs the before/after snapshots).
 	after, _ := h.repo.FindDoc(r.Context(), imageCategoryCollection, id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	out := req.doc()
@@ -208,15 +206,15 @@ func (h *Handler) imageCategoryUpdate(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, out)
 }
 
-// imageCategoryDelete handles deleteCategory: CASCADE — getGroupsByCategoryId(id) →
-// deleteImageGroup(each) → deleteById(id). delete is `void` → HTTP 200, empty body.
-// (Does NOT 404 a missing category here — deleteById on an absent id is a no-op.)
+// imageCategoryDelete CASCADE-deletes: load the category's groups → delete each group → delete the
+// category by id. Returns no body → HTTP 200, empty body. (Does NOT 404 a missing category here —
+// deleting an absent id is a no-op.)
 func (h *Handler) imageCategoryDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, imageGroupPerm) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	// Cascade-delete the category's groups first (deleteImageGroup per group).
+	// Cascade-delete the category's groups first (one delete per group).
 	groups, err := h.repo.imageGroupsByCategory(r.Context(), id)
 	if httpx.WriteError(w, err) {
 		return
@@ -229,18 +227,18 @@ func (h *Handler) imageCategoryDelete(w http.ResponseWriter, r *http.Request) {
 		if _, err := h.repo.DeleteDoc(r.Context(), imageGroupCollection, gid); httpx.WriteError(w, err) {
 			return
 		}
-		// TODO(audit): logAsync(adminEvent DELETE IMAGE_GROUP gid SUCCESS)
+		// TODO(audit): write a DELETE IMAGE_GROUP admin audit event.
 	}
-	// TODO(audit): logAsync(adminEvent DELETE IMAGE_CATEGORY id SUCCESS)
+	// TODO(audit): write a DELETE IMAGE_CATEGORY admin audit event.
 	if _, err := h.repo.DeleteDoc(r.Context(), imageCategoryCollection, id); httpx.WriteError(w, err) {
 		return
 	}
-	// the handler is `void` → HTTP 200, empty body.
+	// no body → HTTP 200, empty body.
 	w.WriteHeader(http.StatusOK)
 }
 
-// imageGroupsByCategory handles getGroupsByCategory: getGroupsByCategoryId(id)
-// (findByCategoryId) → list envelope. NO 404 if the category is absent — just an empty list.
+// imageGroupsByCategory lists the groups for a category id → list envelope. NO 404 if the category
+// is absent — just an empty list.
 func (h *Handler) imageGroupsByCategory(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, imageGroupPerm) {
 		return
@@ -257,7 +255,7 @@ func (h *Handler) imageGroupsByCategory(w http.ResponseWriter, r *http.Request) 
 
 // --- ImageGroup handlers ---
 
-// imageGroupCreate handles createGroup: save(body) → single(saved).
+// imageGroupCreate stores the request body as a new group and returns the saved doc.
 func (h *Handler) imageGroupCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, imageGroupPerm) {
 		return
@@ -271,11 +269,11 @@ func (h *Handler) imageGroupCreate(w http.ResponseWriter, r *http.Request) {
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): logAsync(adminEvent CREATE IMAGE_GROUP saved.id saved.name SUCCESS)
+	// TODO(audit): write a CREATE IMAGE_GROUP admin audit event.
 	httpx.OK(w, shapeDoc(saved))
 }
 
-// imageGroupGet handles getGroup: findById(id).orElseThrow(notFound "Image group not found").
+// imageGroupGet loads a group by id; 404 "Image group not found" if absent.
 func (h *Handler) imageGroupGet(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, imageGroupPerm) {
 		return
@@ -291,8 +289,8 @@ func (h *Handler) imageGroupGet(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, shapeDoc(doc))
 }
 
-// imageGroupUpdate handles updateGroup: the handler IGNORES the path {id} and save()s the
-// request body (upsert). Keyed by the path id, full overwrite (nulls dropped). single(saved).
+// imageGroupUpdate IGNORES the request body's own id and upserts the group, keyed by the path id,
+// full overwrite (nulls dropped). Returns the saved doc.
 func (h *Handler) imageGroupUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, imageGroupPerm) {
 		return
@@ -307,7 +305,7 @@ func (h *Handler) imageGroupUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.imageUpsert(r.Context(), imageGroupCollection, id, req.doc()); httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE IMAGE_GROUP: field-level diff (middleware computes diffSnapshots(before, after)).
+	// UPDATE IMAGE_GROUP: field-level diff (the middleware diffs the before/after snapshots).
 	after, _ := h.repo.FindDoc(r.Context(), imageGroupCollection, id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	out := req.doc()
@@ -315,7 +313,7 @@ func (h *Handler) imageGroupUpdate(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, out)
 }
 
-// imageGroupDelete handles deleteGroup: deleteById(id). delete is `void` → HTTP 200, empty body.
+// imageGroupDelete deletes the group by id. Returns no body → HTTP 200, empty body.
 func (h *Handler) imageGroupDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, imageGroupPerm) {
 		return
@@ -323,7 +321,7 @@ func (h *Handler) imageGroupDelete(w http.ResponseWriter, r *http.Request) {
 	if _, err := h.repo.DeleteDoc(r.Context(), imageGroupCollection, chi.URLParam(r, "id")); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): logAsync(adminEvent DELETE IMAGE_GROUP id SUCCESS)
+	// TODO(audit): write a DELETE IMAGE_GROUP admin audit event.
 	w.WriteHeader(http.StatusOK)
 }
 

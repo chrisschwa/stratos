@@ -12,24 +12,23 @@ import (
 // builtininvoice.go serves the built-in-invoice surface (/api/v1/admin/built-in-invoice). Both
 // endpoints are READS gated on ADMIN_BILL_READ:
 //
-//	GET /built-in-invoice/{id}          → list(id)   (id == invoiceGatewayId)
-//	GET /built-in-invoice/download/{id} → getById(id)-or-404 → downloadInvoice(...)
+//	GET /built-in-invoice/{id}          → list by gateway id (id == invoiceGatewayId)
+//	GET /built-in-invoice/download/{id} → load by id or 404 → download the invoice PDF
 //
 // Neither is registered in handler.go (Grep'd), so both are added here. The integrator wires
 // h.routeBuiltInInvoice(r) into Routes().
 //
-// list(invoiceGatewayId) = findAllByInvoiceGatewayIdOrderByCreatedAtDesc —
-// a filtered, createdAt-DESC list of the `builtInInvoice` collection, wrapped in the list envelope.
+// The list read filters the `builtInInvoice` collection by invoiceGatewayId, newest first,
+// wrapped in the list envelope.
 // Empty under greenfield → {data:[],paging}; the raw BuiltInInvoice domain (carrying the nested
 // BillingProfile + CreateInvoiceDetails) is passed through via shapeDoc (_id→id, drop _class). A
 // populated doc's full raw shape (nested money / dates) is the same deferred concern as
 // the other admin raw-domain lists — fails loud if populated, billing-list precedent.
 //
-// download(id) = getById(id) (404 "Invoice %s not found" — interpolated, NO trailing space) then
-// downloadInvoice(profile, createInvoiceDetails.invoiceGatewayId, id) which resolves
-// the Invoice integration provider and fetches the rendered PDF bytes from the external
+// The download read loads by id (404 "Invoice %s not found" — interpolated, NO trailing space) then
+// resolves the invoice integration provider and fetches the rendered PDF bytes from the external
 // invoice vendor. That external fetch is an external integration point (no live vendor call this pass);
-// the getById-or-404 state check is faithful, then the endpoint returns 501.
+// the load-or-404 state check is faithful, then the endpoint returns 501.
 
 const builtInInvoiceCollection = "builtInInvoice"
 
@@ -43,8 +42,8 @@ func (h *Handler) routeBuiltInInvoice(r chi.Router) {
 	r.Get("/built-in-invoice/{id}", h.builtInInvoiceList)
 }
 
-// builtInInvoiceList handles listBuiltInInvoices: list(id) → findAllByInvoiceGatewayId... DESC.
-// The {id} path variable is the invoiceGatewayId (passed straight to service.list).
+// builtInInvoiceList lists the built-in invoices for a gateway id, newest first.
+// The {id} path variable is the invoiceGatewayId.
 func (h *Handler) builtInInvoiceList(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, builtInInvoiceReadPerm) {
 		return
@@ -59,9 +58,9 @@ func (h *Handler) builtInInvoiceList(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, items)
 }
 
-// builtInInvoiceDownload handles downloadBuiltInInvoice: getById(id)-or-404 then the external invoice
-// PDF download. The 404 is the faithful state check (getById); the actual
-// download from the Invoice vendor is an external integration point → 501 after the existence check.
+// builtInInvoiceDownload loads the invoice by id or 404s, then performs the external invoice
+// PDF download. The 404 is the faithful state check; the actual
+// download from the invoice vendor is an external integration point → 501 after the existence check.
 func (h *Handler) builtInInvoiceDownload(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, builtInInvoiceReadPerm) {
 		return
@@ -75,7 +74,7 @@ func (h *Handler) builtInInvoiceDownload(w http.ResponseWriter, r *http.Request)
 		httpx.WriteError(w, httpx.NotFound(fmt.Sprintf("Invoice %s not found", id)))
 		return
 	}
-	// External integration point (assessed dev232, stays deliberately): downloadInvoice
+	// External integration point (assessed dev232, stays deliberately): the download
 	// renders the invoice PDF — via the stored HTML template or the
 	// programmatic layout. Under greenfield NO builtInInvoice docs exist (the on-payment
 	// invoice-generation leg itself is deferred), so this endpoint 404s before ever reaching the

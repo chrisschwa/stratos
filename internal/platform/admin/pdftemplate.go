@@ -31,24 +31,23 @@ var defaultPDFTemplates embed.FS
 // pattern: id-aware CRUD via the crud.go helpers, exact perms / error strings / response
 // envelopes, `_id`→`id` shaping on the way out.
 //
-// READ perm  = admin:message_template:read  (ADMIN_MESSAGE_TEMPLATE_READ)
-// WRITE perm = admin:message_template:manage (ADMIN_MESSAGE_TEMPLATE_MANAGE)
+// READ perm  = admin:message_template:read
+// WRITE perm = admin:message_template:manage
 //
 // NOTE: the bare list GET /pdf-templates is ALREADY registered in handler.go (listRaw); this file
-// adds everything else (the mutations + the missing reads). The mutations call
-// auditService-equivalent flows only implicitly — there is no audit call in this surface,
+// adds everything else (the mutations + the missing reads). This surface writes no audit events,
 // so no // TODO(audit) is needed here.
 //
 // LIVE since dev232:
-//   - POST /{id}/preview           → validateTemplateWithData (Mustache render → HTML string; a
-//     render error returns the "Template validation error: …" STRING, 200)
+//   - POST /{id}/preview           → validate the template against sample data (Mustache render → HTML
+//     string; a render error returns the "Template validation error: …" STRING, 200)
 //   - POST /{id}/revert-to-default → bundled default HTML (go:embed) + name/description reset + save
 //
 // NOT WIRED BY DESIGN (HTML→PDF needs a vendor renderer; there is no vendor-less HTML→PDF path — the
 // bill/statement PDFs render natively via fpdf instead):
-//   - POST /{id}/download      → generatePDFFromTemplate (application/pdf bytes)
-//   - GET  /{id}/preview-pdf   → generatePDFFromTemplate (application/pdf bytes)
-// These return 501. The datastore/state lookups they perform (getTemplateById → 404) ARE faithful and
+//   - POST /{id}/download      → render the template to application/pdf bytes
+//   - GET  /{id}/preview-pdf   → render the template to application/pdf bytes
+// These return 501. The lookups they perform (load the template → 404) ARE faithful and
 // run first, so a bogus id still yields the exact 404.
 
 const (
@@ -115,7 +114,7 @@ func parsePDFTemplateType(raw string) (string, *httpx.HTTPError) {
 	}
 }
 
-// pdfTemplateCreate handles createTemplate(): save → single(saved). ADMIN_MESSAGE_TEMPLATE_MANAGE.
+// pdfTemplateCreate saves a new template and returns the saved doc. Requires manage permission.
 func (h *Handler) pdfTemplateCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pdfTemplateManagePerm) {
 		return
@@ -132,7 +131,7 @@ func (h *Handler) pdfTemplateCreate(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, shapeDoc(saved))
 }
 
-// pdfTemplateGet handles getTemplate(): getTemplateById-or-404 → single. ADMIN_MESSAGE_TEMPLATE_READ.
+// pdfTemplateGet loads a template by id, 404 if absent, and returns it. Requires read permission.
 func (h *Handler) pdfTemplateGet(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pdfTemplateReadPerm) {
 		return
@@ -145,13 +144,13 @@ func (h *Handler) pdfTemplateGet(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, shapeDoc(doc))
 }
 
-// pdfTemplateUpdate handles updateTemplate(): getTemplateById-or-404 → validateTemplate (blank-content
-// guard) → overwrite name/description/content/type → save → single. ADMIN_MESSAGE_TEMPLATE_MANAGE.
+// pdfTemplateUpdate loads the template (404 if absent), rejects blank content (400), overwrites
+// name/description/content/type, saves, and returns it. Requires manage permission.
 //
-// validateTemplate ALSO renders a sample PDF (Mustache compile) to catch a
-// malformed template; that render is not wired. The deterministic, faithful part — the
-// blank-content 400 — IS covered; a structurally-bad-but-non-blank Mustache template that would be
-// rejected is the deferred edge (noted in 'deferred'). The persisted state on the happy path matches.
+// Validation also renders a sample PDF (Mustache compile) to catch a malformed template; that
+// render is not wired. The deterministic part — the blank-content 400 — IS covered; a
+// structurally-bad-but-non-blank Mustache template that would be rejected is the deferred edge.
+// The persisted state on the happy path matches.
 func (h *Handler) pdfTemplateUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pdfTemplateManagePerm) {
 		return
@@ -167,7 +166,7 @@ func (h *Handler) pdfTemplateUpdate(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, herr)
 		return
 	}
-	// validateTemplate: blank content → 400 (HTMLBuiltInInvoiceClient.validateTemplate).
+	// Reject blank content with 400.
 	if strings.TrimSpace(req.Content) == "" {
 		httpx.WriteError(w, httpx.BadRequest("HTML content cannot be empty"))
 		return
@@ -184,14 +183,14 @@ func (h *Handler) pdfTemplateUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.ReplaceDoc(r.Context(), pdfTemplateCollection, id, existing); httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE PDF_TEMPLATE: field-level diff (middleware computes diffSnapshots(before, after)).
+	// Record an audit event with a field-level diff of the before/after documents.
 	after, _ := h.repo.FindDoc(r.Context(), pdfTemplateCollection, id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// pdfTemplateDelete handles deleteTemplate(): getTemplateById-or-404 → deleteById → 202 (no body).
-// Returns 202 with an empty body. ADMIN_MESSAGE_TEMPLATE_MANAGE.
+// pdfTemplateDelete loads the template (404 if absent), deletes it, and returns 202 with an empty
+// body. Requires manage permission.
 func (h *Handler) pdfTemplateDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pdfTemplateManagePerm) {
 		return
@@ -207,8 +206,8 @@ func (h *Handler) pdfTemplateDelete(w http.ResponseWriter, r *http.Request) {
 	httpx.Accepted(w)
 }
 
-// pdfTemplatesByType handles getTemplatesByType(): valueOf(type) → findByType → list envelope.
-// ADMIN_MESSAGE_TEMPLATE_READ.
+// pdfTemplatesByType parses the type, lists every template of that type, and returns the list
+// envelope. Requires read permission.
 func (h *Handler) pdfTemplatesByType(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pdfTemplateReadPerm) {
 		return
@@ -228,8 +227,8 @@ func (h *Handler) pdfTemplatesByType(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, items)
 }
 
-// pdfTemplatePlaceholders handles getPlaceholders(): valueOf(type) → the static placeholder map →
-// single({...}). ADMIN_MESSAGE_TEMPLATE_READ.
+// pdfTemplatePlaceholders parses the type and returns its static placeholder map. Requires read
+// permission.
 func (h *Handler) pdfTemplatePlaceholders(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pdfTemplateReadPerm) {
 		return
@@ -242,10 +241,9 @@ func (h *Handler) pdfTemplatePlaceholders(w http.ResponseWriter, r *http.Request
 	httpx.OK(w, pdfTemplatePlaceholdersByType(t))
 }
 
-// pdfTemplateRevert handles revertTemplateToDefault(): getTemplateById-or-404 → load the bundled
-// default HTML for the template's TYPE + reset name/description → updateTemplate (save) → single.
-// An unknown/absent type → the switch throws inside the try → 500 "Failed to revert template…".
-// ADMIN_MESSAGE_TEMPLATE_MANAGE.
+// pdfTemplateRevert loads the template (404 if absent), loads the bundled default HTML for the
+// template's TYPE, resets name/description, saves, and returns it. An unknown/absent type yields
+// 500 "Failed to revert template…". Requires manage permission.
 func (h *Handler) pdfTemplateRevert(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pdfTemplateManagePerm) {
 		return
@@ -264,8 +262,8 @@ func (h *Handler) pdfTemplateRevert(w http.ResponseWriter, r *http.Request) {
 	case "STATEMENT":
 		asset, name, desc = "templates/statement-template.html", "Statement Template", "Default template for statements"
 	default:
-		// template.getType() null/unknown → the switch throws → catch → 500 (message keeps
-		// the raw "{}" placeholder — internalServerError(fmt, id, cause) never formats it).
+		// A null/unknown type falls through to 500 (the message keeps the raw "{}"
+		// placeholder, unformatted).
 		httpx.WriteError(w, httpx.NewError(http.StatusInternalServerError, http.StatusInternalServerError,
 			"Failed to revert template id {} to default"))
 		return
@@ -286,9 +284,9 @@ func (h *Handler) pdfTemplateRevert(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// pdfTemplateDownload handles downloadTemplate(): getTemplateById-or-404 → generatePDFFromTemplate
-// (req.template content + dummy data) → application/pdf bytes. The PDF render is not wired; the 404 path
-// runs first and is faithful. ADMIN_MESSAGE_TEMPLATE_READ.
+// pdfTemplateDownload loads the template (404 if absent), then would render it (request template
+// content + dummy data) to application/pdf bytes. The PDF render is not wired; the 404 path runs
+// first and is faithful. Requires read permission.
 func (h *Handler) pdfTemplateDownload(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pdfTemplateReadPerm) {
 		return
@@ -297,17 +295,17 @@ func (h *Handler) pdfTemplateDownload(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, herr)
 		return
 	}
-	// Drain/decode the body for shape-faithfulness (DownloadTemplateRequest{template}); unused (not wired).
+	// Drain/decode the body for request-shape faithfulness; unused (not wired).
 	var req downloadTemplateRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
 		"PDF download not implemented"))
 }
 
-// pdfTemplatePreview handles getTemplatePreview(): getTemplateById-or-404 (its TYPE picks the dummy
-// data), Mustache-render the RAW request body (the request-body string content) with the dummy
-// data → single(htmlString). A render failure returns the "Template validation error: …" STRING
-// with HTTP 200 (validateTemplateWithData catches). ADMIN_MESSAGE_TEMPLATE_READ.
+// pdfTemplatePreview loads the template (404 if absent; its TYPE picks the dummy data), then
+// Mustache-renders the RAW request body (the request-body string content) with the dummy data and
+// returns the HTML string. A render failure returns the "Template validation error: …" STRING with
+// HTTP 200. Requires read permission.
 func (h *Handler) pdfTemplatePreview(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pdfTemplateReadPerm) {
 		return
@@ -329,9 +327,8 @@ func (h *Handler) pdfTemplatePreview(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, html)
 }
 
-// pdfTemplatePreviewPDF handles getTemplatePdfPreview(): getTemplateById-or-404 →
-// generatePDFFromTemplate → application/pdf bytes. The render is not wired; the 404 path runs first and
-// is faithful. ADMIN_MESSAGE_TEMPLATE_READ.
+// pdfTemplatePreviewPDF loads the template (404 if absent), then would render it to application/pdf
+// bytes. The render is not wired; the 404 path runs first and is faithful. Requires read permission.
 func (h *Handler) pdfTemplatePreviewPDF(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pdfTemplateReadPerm) {
 		return
@@ -344,9 +341,8 @@ func (h *Handler) pdfTemplatePreviewPDF(w http.ResponseWriter, r *http.Request) 
 		"PDF preview not implemented"))
 }
 
-// pdfTemplateByID loads a template by id (findById): the raw doc, or 404
-// "PDF Template not found with id: <id>" (HttpError.notFound). Returns the doc still carrying `_id`
-// (caller shapeDoc's before writing).
+// pdfTemplateByID loads a template by id: the raw doc, or 404 "PDF Template not found with id:
+// <id>". Returns the doc still carrying `_id` (the caller shapes it before writing).
 func (h *Handler) pdfTemplateByID(r *http.Request, id string) (pgdoc.M, *httpx.HTTPError) {
 	doc, err := h.repo.FindDoc(r.Context(), pdfTemplateCollection, id)
 	if err != nil {
@@ -363,10 +359,10 @@ type downloadTemplateRequest struct {
 	Template pdfTemplateReq `json:"template"`
 }
 
-// pdfTemplateDummyData builds the dummy data — the sample values the
-// preview renders with. Money values are the fixed STRINGS ("50.0"), so the preview HTML matches
-// byte-for-byte. NOTE: the STATEMENT block has a bug — item2's period is written onto item1
-// (item1.put twice, item2 never gets one) — kept so previews render identically.
+// pdfTemplateDummyData builds the dummy data — the sample values the preview renders with. Money
+// values are the fixed STRINGS ("50.0"), so the preview HTML matches byte-for-byte. NOTE: the
+// STATEMENT block has a bug — item2's period is written onto item1 (item1 gets the period twice,
+// item2 never gets one) — kept so previews render identically.
 func pdfTemplateDummyData(t string) map[string]any {
 	switch t {
 	case "INVOICE":

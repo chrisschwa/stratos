@@ -120,7 +120,7 @@ func (r *Repo) HydrateAuditEvents(ctx context.Context, events []audit.AuditEvent
 	return out, nil
 }
 
-// findByIDs is a `_id $in` batch read (plain string ids).
+// findByIDs batch-reads every doc in collection whose id is one of ids (plain string ids).
 func (r *Repo) findByIDs(ctx context.Context, collection string, ids []string) ([]pgdoc.M, error) {
 	var docs []pgdoc.M
 	if err := r.c(collection).Find(ctx, pgdoc.M{"_id": pgdoc.M{"$in": ids}}, &docs); err != nil {

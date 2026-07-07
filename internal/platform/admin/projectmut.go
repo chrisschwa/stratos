@@ -27,26 +27,26 @@ import (
 // wired in cmd/api — nil → they degrade to their original 501 responses, which is what the unit tests
 // exercise):
 //
-//   - POST   /project                                  (create; optional bootstrapProject provision)
+//   - POST   /project                                  (create; optional bootstrap provision)
 //   - POST   /project/{id}/sync                         (syncjob.SyncOne — whole-project / scoped)
 //   - POST   /project/{id}/{status}  (ENABLED|DISABLED) (nova pause/unpause + status flip; resume async + sync)
-//   - GET    /project/{id}/external-service/{esid}      (bootstrapProject onto the explicit service)
+//   - GET    /project/{id}/external-service/{esid}      (bootstrap onto the explicit service)
 //   - GET    /project/unassociated-os-projects         (live keystone ListAllProjects, read-only)
 //   - GET    /project/{id}/resources/counts            (cache aggregation — already live)
 //
-//   - DELETE /project/{id}      (scheduleProjectDeletion → CanDelete pre-check → flip SCHEDULED_FOR_DELETION)
-//   - DELETE /project/{id}/now  (deleteProjectNow → flip DELETE_IN_PROGRESS → async Teardown cascade
+//   - DELETE /project/{id}      (schedule deletion → CanDelete pre-check → flip SCHEDULED_FOR_DELETION)
+//   - DELETE /project/{id}/now  (delete now → flip DELETE_IN_PROGRESS → async Teardown cascade
 //                                = project.Handler.TeardownProject: cloud resources + keystone tenant → DELETED)
 //
 // IN SCOPE (no cloud, pure datastore): GET /project/{id}/members, PUT /project/{id} (field-set),
 // DELETE /project/{id}/cancel (status flip to ENABLED), and the no-cloud branches of
 // POST /project/{id}/{status}.
 //
-// Audit: every mutation also writes an AuditService event — deferred (// TODO(audit)).
+// Audit: every mutation also writes an admin audit event — deferred (// TODO(audit)).
 
 const projectCollection = "project"
 
-// project perms (exact AdminPermissionEnum keys).
+// project perms (exact permission keys).
 const (
 	projectReadPerm   = "admin:project:read"
 	projectCreatePerm = "admin:project:create"
@@ -54,7 +54,7 @@ const (
 	projectDeletePerm = "admin:project:delete"
 )
 
-// routeProjectMut registers ONLY the new ProjectAdmin mutation + missing-read routes. The {id}
+// routeProjectMut registers ONLY the new project mutation + missing-read routes. The {id}
 // param name reuses the one handler.go already uses on /project/{id} (chi requires a single param
 // name at a given path position). The static second segments (members / sync / now / cancel /
 // external-service) take precedence over the {status} param route at the same position.
@@ -72,10 +72,10 @@ func (h *Handler) routeProjectMut(r chi.Router) {
 	r.Post("/project/{id}/{status}", h.projectUpdateStatus)
 }
 
-// projectIDNotFound is the exact 404 from ProjectAdminService.get(id) → translation
-// PROJECT_ID_NOT_FOUND = "Project with id %s not found " (trailing space, interpolated). This is the
-// message used by update / updateStatus / scheduleProjectForDeletion. (Note: getProject(id) used by
-// the GET /{id} read uses a DIFFERENT message and is registered in handler.go.)
+// projectIDNotFound is the exact 404 message
+// "Project with id %s not found " (trailing space, interpolated). This is the
+// message used by update / updateStatus / schedule-deletion. (Note: the GET /{id} read uses
+// a DIFFERENT message and is registered in handler.go.)
 func projectIDNotFound(id string) *httpx.HTTPError {
 	return httpx.NotFound(fmt.Sprintf("Project with id %s not found ", id))
 }
@@ -95,12 +95,12 @@ func (h *Handler) findProjectOr404(w http.ResponseWriter, r *http.Request, id st
 
 // ── create ──────────────────────────────────────────────────────────────────────────────────────
 
-// projectCreate handles create(): asserts →
-// organization (404) + its billingProfileId (400) + userIds exist (404) → then the try{}:
+// projectCreate validates the request →
+// organization (404) + its billingProfileId (400) + userIds exist (404) → then:
 // resolve the effective billing profile (validated but NOT stored on the project — the builder
 // omits it), build the Project (ENABLED, org-OWNER membership), save, optionally bootstrap the
 // external service (create-or-ADOPT the keystone tenant via projectCloud.Bootstrap), add the
-// userIds as MEMBERs, save, audit CREATE. Any failure inside the try{} → catch →
+// userIds as MEMBERs, save, audit CREATE. Any failure below →
 // 500 "Error creating project".
 func (h *Handler) projectCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectCreatePerm) {
@@ -111,7 +111,7 @@ func (h *Handler) projectCreate(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
 		return
 	}
-	// Assert.* → 400. projectName + organizationId are required.
+	// Required-field validation → 400. projectName + organizationId are required.
 	if req.ProjectName == "" {
 		httpx.WriteError(w, httpx.BadRequest("Project name cannot be empty"))
 		return
@@ -141,7 +141,7 @@ func (h *Handler) projectCreate(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Organization does not have a billing profile configured"))
 		return
 	}
-	// Pre-try userIds existence check (getById is looped, 404 before anything persists).
+	// Up-front userIds existence check (looped lookup, 404 before anything persists).
 	for _, uid := range req.UserIds {
 		u, err := h.repo.FindDoc(ctx, "users", uid)
 		if httpx.WriteError(w, err) {
@@ -152,7 +152,7 @@ func (h *Handler) projectCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// ── try{} — any failure below maps to 500 "Error creating project" ──
+	// ── any failure below maps to 500 "Error creating project" ──
 	createFailed := func() {
 		httpx.WriteError(w, httpx.NewError(http.StatusInternalServerError, http.StatusInternalServerError,
 			"Error creating project"))
@@ -163,11 +163,11 @@ func (h *Handler) projectCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	bp, err := h.repo.FindDoc(ctx, "billingProfile", bpID)
 	if err != nil || bp == nil {
-		createFailed() // getBillingProfileById throws inside the try → caught → 500
+		createFailed() // missing billing profile → 500
 		return
 	}
 	// Owner membership = the organization's OWNER member (400 when the org has none). Member docs
-	// carry `roles: []string` (getRole() = roles[0]); the array-contains match is the datastore
+	// carry `roles: []string` (the role is roles[0]); the array-contains match is the datastore
 	// equivalent — live-caught on the dev226 drill (`role` matched nothing → false "no owner").
 	ownerDoc, err := h.repo.FindOneBy(ctx, "organization_members",
 		pgdoc.M{"organizationId": req.OrganizationId, "roles": pgdoc.M{"$contains": "OWNER"}})
@@ -221,8 +221,8 @@ func (h *Handler) projectCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	pid, _ := created["_id"].(string)
 	if req.ExternalServiceId != "" {
-		// bootstrapProject with an explicit service (+ optional ADOPT of an existing keystone
-		// project via externalProjectId — OpenstackProjectProvisionData).
+		// Bootstrap with an explicit service (+ optional ADOPT of an existing keystone
+		// project via externalProjectId).
 		if err := h.projectCloud.Bootstrap(ctx, pid, req.ExternalServiceId, req.ExternalProjectId); err != nil {
 			createFailed()
 			return
@@ -250,11 +250,10 @@ type createProjectRequest struct {
 
 // ── reads (datastore-only / not wired) ──────────────────────────────────────────────────────────────────
 
-// projectMembers handles listMembers: getProject(id) → for each membership, userAdminService
-// .getUserBySub(sub) → list of User. Pure datastore (no cloud). Resolves the project first (404 via the
-// getProject message — note the read GET /{id} uses getProject's message, which differs from the
-// mutation message). Here projectService.getProjectById is called, whose message is the
-// "The project with id %s was not found. " one already used by the registered GET /{id}.
+// projectMembers lists a project's members: load the project → for each membership, resolve the
+// user by sub → list of User. Pure datastore (no cloud). Resolves the project first (404 via the
+// "The project with id %s was not found. " message already used by the registered GET /{id},
+// which differs from the mutation 404 message).
 func (h *Handler) projectMembers(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectReadPerm) {
 		return
@@ -265,14 +264,14 @@ func (h *Handler) projectMembers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if proj == nil {
-		// getProject → projectService.getProjectById → PROJECT_ID_WAS_NOT_FOUND message.
+		// Missing project → the "The project with id %s was not found. " message.
 		httpx.WriteError(w, httpx.NotFound(fmt.Sprintf("The project with id %s was not found. ", id)))
 		return
 	}
 	// Resolve each membership.sub → the User doc. Under greenfield the User lookup subsystem is the
 	// users collection; we resolve the members directly from the users collection by sub so the list
-	// matches the userAdminService.getUserBySub mapping. Missing users are skipped (a null user
-	// would NPE, but greenfield projects have valid owner subs).
+	// matches the by-sub user lookup. Missing users are skipped (greenfield projects have valid owner
+	// subs).
 	subs := membershipSubs(proj)
 	members := []pgdoc.M{}
 	for _, sub := range subs {
@@ -316,8 +315,8 @@ func membershipSubs(proj pgdoc.M) []string {
 	return out
 }
 
-// projectResourceCounts handles countProjectResources: cloudResourceCounter.countCloudResourcesByType(id).
-// The counter is a pure datastore aggregation over the cloudResource CACHE (group by
+// projectResourceCounts counts a project's cloud resources.
+// It is a pure datastore aggregation over the cloudResource CACHE (group by
 // type+serviceId, SECURITY_GROUP minus the default sg, + TOTAL) — no live cloud call — so this
 // is fully portable via cloud.Repo.CountByType.
 func (h *Handler) projectResourceCounts(w http.ResponseWriter, r *http.Request) {
@@ -331,9 +330,10 @@ func (h *Handler) projectResourceCounts(w http.ResponseWriter, r *http.Request) 
 	httpx.OK(w, counts)
 }
 
-// projectUnassociatedOsProjects handles listUnassociatedOsProjects(?externalServiceId): resolve the
-// external service, list ALL keystone projects (admin identity scope), subtract the ones already
-// mapped to a stratos project via services[].externalProjectId, return the rest (read-only).
+// projectUnassociatedOsProjects lists keystone projects not yet mapped to a stratos project
+// (?externalServiceId): resolve the external service, list ALL keystone projects (admin identity
+// scope), subtract the ones already mapped to a stratos project via services[].externalProjectId,
+// return the rest (read-only).
 func (h *Handler) projectUnassociatedOsProjects(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectReadPerm) {
 		return
@@ -392,7 +392,7 @@ func (h *Handler) projectUnassociatedOsProjects(w http.ResponseWriter, r *http.R
 }
 
 // externalServiceOr404 resolves + decrypts an external service, or writes the exact
-// platformExternalService.get error — the odd HTTP-400/code-404 "Cloud provider is not found.
+// external-service lookup error — the odd HTTP-400/code-404 "Cloud provider is not found.
 // Please contact support." envelope (same as the serviceByID read).
 func (h *Handler) externalServiceOr404(w http.ResponseWriter, r *http.Request, esID string) (*externalservice.ExternalService, bool) {
 	if h.esSvc == nil {
@@ -412,11 +412,10 @@ func (h *Handler) externalServiceOr404(w http.ResponseWriter, r *http.Request, e
 	return es, true
 }
 
-// projectAddExternalService handles addExternalService (GET /{id}/external-service/{esid}): resolve
-// the project (mutation 404) + external service (the 400/404 envelope), then
-// projectService.bootstrapProject with the explicit service — create-or-reuse the keystone tenant
-// and attach the ProjectExternalService entry. Bootstrap failure = the wrapped
-// 500 "Cannot sync the project with the infrastructure. ".
+// projectAddExternalService attaches an external service to a project (GET /{id}/external-service/{esid}):
+// resolve the project (mutation 404) + external service (the 400/404 envelope), then bootstrap with
+// the explicit service — create-or-reuse the keystone tenant and attach the ProjectExternalService
+// entry. Bootstrap failure = the wrapped 500 "Cannot sync the project with the infrastructure. ".
 func (h *Handler) projectAddExternalService(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectUpdatePerm) {
 		return
@@ -436,7 +435,7 @@ func (h *Handler) projectAddExternalService(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err := h.projectCloud.Bootstrap(r.Context(), id, esID, ""); err != nil {
-		// ProjectService.bootstrapProject catch → internalServerError(CANT_SYNC_PROJECT_WITH_INFRASTRUCTURE).
+		// Bootstrap failure → 500 "Cannot sync the project with the infrastructure. ".
 		httpx.WriteError(w, httpx.NewError(http.StatusInternalServerError, http.StatusInternalServerError,
 			"Cannot sync the project with the infrastructure. "))
 		return
@@ -445,18 +444,17 @@ func (h *Handler) projectAddExternalService(w http.ResponseWriter, r *http.Reque
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE PROJECT audit (adds withSnapshot(externalService); the middleware diff carries
-	// the attached services entry).
+	// UPDATE PROJECT audit (the middleware diff carries the attached services entry).
 	audit.RecordSnapshots(r.Context(), maps.Clone(before), after)
 	httpx.OK(w, shapeDoc(after))
 }
 
 // ── sync (cloud integration point) ────────────────────────────────────────────────────────────────
 
-// projectSync handles syncProject (POST /{id}/sync?serviceId): resolves the project (404 via
-// getProjectById's message), then runs the live sync — whole-project (syncProjectLocked; gated on
-// ENABLED) when serviceId is blank, else just that service (syncExternalService). Returns the
-// project resolved BEFORE the sync.
+// projectSync syncs a project (POST /{id}/sync?serviceId): resolves the project (404 via the
+// "The project with id %s was not found. " message), then runs the live sync — whole-project
+// (gated on ENABLED) when serviceId is blank, else just that service. Returns the project resolved
+// BEFORE the sync.
 func (h *Handler) projectSync(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectUpdatePerm) {
 		return
@@ -484,10 +482,10 @@ func (h *Handler) projectSync(w http.ResponseWriter, r *http.Request) {
 
 // ── update (datastore, in scope) ──────────────────────────────────────────────────────────────────────
 
-// projectUpdate handles update (PUT /{id}): get(id)-or-404, then set
+// projectUpdate updates a project (PUT /{id}): load-or-404, then set
 // name / billingProfileId / organizationId (all three set unconditionally, including to null
-// when the field is absent), save, return single. Pure datastore. The three fields are overwritten:
-// an absent field becomes null → omitted from the stored doc (nulls omitted).
+// when the field is absent), save, return the project. Pure datastore. The three fields are
+// overwritten: an absent field becomes null → omitted from the stored doc (nulls omitted).
 func (h *Handler) projectUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectUpdatePerm) {
 		return
@@ -503,8 +501,7 @@ func (h *Handler) projectUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := maps.Clone(existing)
-	// project.setName(req.name); setBillingProfileId(req.billingProfileId);
-	// setOrganizationId(req.organizationId). Overwrite all three — drop old values first so an
+	// Overwrite name / billingProfileId / organizationId — drop old values first so an
 	// omitted (null) field is cleared. A blank value persists as cleared (omitted on read).
 	for _, k := range []string{"name", "billingProfileId", "organizationId"} {
 		delete(existing, k)
@@ -521,14 +518,14 @@ func (h *Handler) projectUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.ReplaceDoc(r.Context(), projectCollection, id, existing); httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE PROJECT: field-level diff (middleware computes diffSnapshots(before, after)).
+	// UPDATE PROJECT: field-level diff (the middleware diffs before vs after).
 	after, _ := h.repo.FindDoc(r.Context(), projectCollection, id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// projectUpdateReq is the project-update request body. `data` + `customInfo` are accepted by the
-// DTO but update() never reads them (only name / billingProfileId / organizationId are applied).
+// projectUpdateReq is the project-update request body. `data` + `customInfo` are accepted on the
+// wire but never read (only name / billingProfileId / organizationId are applied).
 type projectUpdateReq struct {
 	Name             string `json:"name"`
 	BillingProfileId string `json:"billingProfileId"`
@@ -537,13 +534,13 @@ type projectUpdateReq struct {
 
 // ── status (datastore flip + cloud suspend/resume integration point) ──────────────────────────────────
 
-// projectUpdateStatus handles updateStatus (POST /{id}/{status}): get(id)-or-404, ProjectStatus
-// .valueOf(status) (invalid → 500), 400 if already in the
+// projectUpdateStatus changes a project's status (POST /{id}/{status}): load-or-404, validate the
+// status value (invalid → 500), 400 if already in the
 // desired status, then:
-//   - ENABLED / DISABLED → onProjectResume / onProjectSuspend against OpenStack (cloud, not wired): the
+//   - ENABLED / DISABLED → resume / suspend against OpenStack (cloud, not wired): the
 //     status is set only AFTER the cloud call succeeds, so we 501 without persisting.
 //   - SCHEDULED_FOR_DELETION / DELETE_IN_PROGRESS → no cloud branch; it falls through and
-//     saves the project with its status unchanged → pure datastore no-op save, return single.
+//     saves the project with its status unchanged → pure datastore no-op save, return the project.
 func (h *Handler) projectUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectUpdatePerm) {
 		return
@@ -551,7 +548,7 @@ func (h *Handler) projectUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	status := chi.URLParam(r, "status")
 	if !isValidProjectStatus(status) {
-		// ProjectStatus.valueOf(invalid) → 500.
+		// Invalid status value → 500.
 		httpx.WriteError(w, httpx.NewError(http.StatusInternalServerError, http.StatusInternalServerError,
 			fmt.Sprintf("Invalid project status %s", status)))
 		return
@@ -562,7 +559,7 @@ func (h *Handler) projectUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	current, _ := existing["status"].(string)
 	if current == status {
-		// translation PROJECT_DESIRED_STATUS = "Project is already in desired status " (trailing space).
+		// "Project is already in desired status " (trailing space).
 		httpx.WriteError(w, httpx.BadRequest("Project is already in desired status "))
 		return
 	}
@@ -577,7 +574,7 @@ func (h *Handler) projectUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		before := maps.Clone(existing)
 		if status == "DISABLED" {
-			// onProjectSuspend is SYNCHRONOUS: keystone member/API-user disable (no-op here —
+			// Suspend is SYNCHRONOUS: keystone member/API-user disable (no-op here —
 			// the bootstrap creates no per-customer keystone users) + nova PAUSE of every cached
 			// server (per-server errors swallowed inside), THEN the status flip persists.
 			if err := h.projectCloud.PauseServers(r.Context(), id, true); httpx.WriteError(w, err) {
@@ -587,9 +584,9 @@ func (h *Handler) projectUpdateStatus(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else {
-			// onProjectResume runs asynchronously: the datastore flip persists immediately; nova UNPAUSE + the
-			// follow-up project sync (PlatformExternalService.onProjectResume also runs syncProject)
-			// happen on a worker thread. Flip first so the async whole-project sync sees ENABLED.
+			// Resume runs asynchronously: the datastore flip persists immediately; nova UNPAUSE + the
+			// follow-up project sync happen on a worker thread. Flip first so the async whole-project
+			// sync sees ENABLED.
 			if _, err := h.repo.SetFields(r.Context(), projectCollection, id, pgdoc.M{"status": status}); httpx.WriteError(w, err) {
 				return
 			}
@@ -612,13 +609,13 @@ func (h *Handler) projectUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		httpx.OK(w, shapeDoc(after))
 		return
 	default:
-		// SCHEDULED_FOR_DELETION / DELETE_IN_PROGRESS: no cloud branch; save()s with the status
-		// unchanged (the if/else never matches, so setStatus is never called). Faithful: save the doc
-		// as-is and return it. (No status field change persists.)
+		// SCHEDULED_FOR_DELETION / DELETE_IN_PROGRESS: no cloud branch; saves with the status
+		// unchanged (the if/else never matches, so the status is never changed). Faithful: save the
+		// doc as-is and return it. (No status field change persists.)
 		if err := h.repo.ReplaceDoc(r.Context(), projectCollection, id, existing); httpx.WriteError(w, err) {
 			return
 		}
-		// TODO(audit): adminEventFromContext UPDATE PROJECT {status} SUCCESS.
+		// TODO(audit): write an UPDATE PROJECT {status} admin audit event.
 		httpx.OK(w, shapeDoc(existing))
 	}
 }
@@ -641,13 +638,12 @@ func isValidProjectStatus(s string) bool {
 
 // ── deletion (datastore flips + cloud integration point) ───────────────────────────────────────────────
 
-// projectScheduleDeletion handles delete (DELETE /{id}?cascade): get(id)-or-404 then
-// projectService.scheduleProjectDeletion. scheduleProjectDeletion calls
-// platformExternalService.canProjectBeDeleted (a CLOUD pre-check) BEFORE flipping the status to
-// SCHEDULED_FOR_DELETION. Because the cloud pre-check gates the persisted flip, this is not wired: we do
-// NOT flip the status (it wouldn't if canProjectBeDeleted threw). The already-scheduled fast path
+// projectScheduleDeletion schedules a project for deletion (DELETE /{id}?cascade): load-or-404 then
+// run a CLOUD pre-check (canDelete) BEFORE flipping the status to
+// SCHEDULED_FOR_DELETION. Because the cloud pre-check gates the persisted flip, when unwired we do
+// NOT flip the status (it wouldn't if the pre-check failed). The already-scheduled fast path
 // (status already SCHEDULED_FOR_DELETION / DELETE_IN_PROGRESS) returns the project WITHOUT touching
-// the cloud — that branch is persisted-safe (no-op) and returns single.
+// the cloud — that branch is persisted-safe (no-op) and returns the project.
 func (h *Handler) projectScheduleDeletion(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectDeletePerm) {
 		return
@@ -659,14 +655,14 @@ func (h *Handler) projectScheduleDeletion(w http.ResponseWriter, r *http.Request
 	}
 	current, _ := existing["status"].(string)
 	if current == "SCHEDULED_FOR_DELETION" || current == "DELETE_IN_PROGRESS" {
-		// scheduleProjectDeletion no-ops (the guard skips the cloud check + the save) and returns
-		// the project unchanged. Pure read-back, no cloud.
-		// TODO(audit): adminEventFromContext DELETE PROJECT scheduled=true SUCCESS.
+		// Already scheduled → no-op (skip the cloud check + the save) and return the project
+		// unchanged. Pure read-back, no cloud.
+		// TODO(audit): write a DELETE PROJECT scheduled=true admin audit event.
 		httpx.OK(w, shapeDoc(existing))
 		return
 	}
-	// platformExternalService.canProjectBeDeleted(ctx, cascade) — a live cloud pre-check gating the
-	// flip. Unwired (tests / degraded boot) → the original 501, BEFORE any persist.
+	// A live cloud pre-check gating the flip. Unwired (tests / degraded boot) → the original 501,
+	// BEFORE any persist.
 	if h.projectCloud == nil || h.projectCloud.CanDelete == nil {
 		httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
 			"scheduleProjectDeletion (canProjectBeDeleted cloud check) not implemented"))
@@ -682,13 +678,13 @@ func (h *Handler) projectScheduleDeletion(w http.ResponseWriter, r *http.Request
 	}
 	existing["status"] = "SCHEDULED_FOR_DELETION"
 	existing["scheduledForDeletionAt"] = now
-	// TODO(audit): adminEventFromContext DELETE PROJECT scheduled=true SUCCESS.
+	// TODO(audit): write a DELETE PROJECT scheduled=true admin audit event.
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// projectDeleteNow handles deleteProjectNow (DELETE /{id}/now): get(id)-or-404, status→DELETE_IN_PROGRESS
-// (persisted), then publishes "executeProjectDeletion" which runs the async OpenStack teardown. The
-// status flip IS the faithful datastore effect and is applied; the publish → async cloud delete is
+// projectDeleteNow deletes a project immediately (DELETE /{id}/now): load-or-404, status→DELETE_IN_PROGRESS
+// (persisted), then dispatches the async OpenStack teardown. The
+// status flip IS the faithful datastore effect and is applied; the async cloud delete is
 // not wired (return 501 after the flip).
 func (h *Handler) projectDeleteNow(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectDeletePerm) {
@@ -699,14 +695,14 @@ func (h *Handler) projectDeleteNow(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// executeProjectDeletion (async OpenStack teardown) is unwired (tests) → the original 501 BEFORE
+	// The async OpenStack teardown is unwired (tests) → the original 501 BEFORE
 	// the status flip (so a degraded boot never orphans a project in DELETE_IN_PROGRESS with no job).
 	if h.projectCloud == nil || h.projectCloud.Teardown == nil {
 		httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
 			"executeProjectDeletion (async cloud teardown) not implemented"))
 		return
 	}
-	// status=DELETE_IN_PROGRESS, persisted (the faithful effect of deleteProjectNow before the publish).
+	// status=DELETE_IN_PROGRESS, persisted (the faithful effect before dispatching the teardown).
 	if _, err := h.repo.SetFields(r.Context(), projectCollection, id, pgdoc.M{"status": "DELETE_IN_PROGRESS"}); httpx.WriteError(w, err) {
 		return
 	}
@@ -715,14 +711,14 @@ func (h *Handler) projectDeleteNow(w http.ResponseWriter, r *http.Request) {
 	if err := h.projectCloud.Teardown(r.Context(), id); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): adminEventFromContext DELETE PROJECT scheduled=false SUCCESS.
+	// TODO(audit): write a DELETE PROJECT scheduled=false admin audit event.
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// projectCancelDeletion handles cancelProjectDeletion (DELETE /{id}/cancel): getProjectById(id)-or-404,
+// projectCancelDeletion cancels a scheduled deletion (DELETE /{id}/cancel): load-or-404,
 // 400 if DELETE_IN_PROGRESS ("Project is deleting. Cannot cancel deletion"), else status→ENABLED +
-// clear scheduledForDeletionAt, save, return single. Pure datastore (no cloud). The 404 here uses
-// getProjectById's message ("The project with id %s was not found. ").
+// clear scheduledForDeletionAt, save, return the project. Pure datastore (no cloud). The 404 here uses
+// the "The project with id %s was not found. " message.
 func (h *Handler) projectCancelDeletion(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectDeletePerm) {
 		return
@@ -741,8 +737,8 @@ func (h *Handler) projectCancelDeletion(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, httpx.BadRequest("Project is deleting. Cannot cancel deletion"))
 		return
 	}
-	// status=ENABLED, scheduledForDeletionAt=null (cleared). Persist via $set + $unset semantics:
-	// SetFields sets status; clear the watermark by setting it to nil (omitted on read).
+	// status=ENABLED, scheduledForDeletionAt cleared. SetFields sets status; clear the watermark by
+	// setting it to nil (omitted on read).
 	if _, err := h.repo.SetFields(r.Context(), projectCollection, id, pgdoc.M{"status": "ENABLED", "scheduledForDeletionAt": nil}); httpx.WriteError(w, err) {
 		return
 	}
@@ -751,6 +747,6 @@ func (h *Handler) projectCancelDeletion(w http.ResponseWriter, r *http.Request) 
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): adminEventFromContext UPDATE PROJECT deletionCancelled=true SUCCESS.
+	// TODO(audit): write an UPDATE PROJECT deletionCancelled=true admin audit event.
 	httpx.OK(w, shapeDoc(updated))
 }

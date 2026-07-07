@@ -120,7 +120,7 @@ func (h *Handler) pricingProfile(r *http.Request, sub string) (*billing.BillingP
 }
 
 // resolveBillingProfileID returns the project's own billingProfileId, falling back to the owning
-// org's (ProjectService.getBillingProfileId).
+// org's billing profile id.
 func (h *Handler) resolveBillingProfileID(ctx context.Context, proj *Project) string {
 	if proj.BillingProfileID != "" {
 		return proj.BillingProfileID

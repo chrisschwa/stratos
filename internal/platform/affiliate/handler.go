@@ -13,7 +13,7 @@ import (
 	"github.com/menlocloud/stratos/pkg/httpx"
 )
 
-// affiliateAmount is the fixed credit reported for a known cfy (AMOUNT_CFY_AFF=10).
+// affiliateAmount is the fixed credit amount reported for a known cfy.
 const affiliateAmount = 10
 
 type Handler struct {
@@ -91,9 +91,9 @@ func (h *Handler) log(w http.ResponseWriter, r *http.Request) {
 	httpx.Raw(w, http.StatusOK, entries)
 }
 
-// resolveProjectBillingProfile mirrors the shared head of getConfig/getLog: resolve the
+// resolveProjectBillingProfile is the shared head of config/log: resolve the
 // caller (400 if uninitialized), load the member-scoped project (404 otherwise), then its
-// billing-profile id via ProjectService.getBillingProfileId (project's own, else the org's).
+// billing-profile id (the project's own, else the org's).
 func (h *Handler) resolveProjectBillingProfile(w http.ResponseWriter, r *http.Request) (string, bool) {
 	u, err := h.users.Require(r.Context(), httpx.RC(r.Context()).Sub)
 	if err != nil {

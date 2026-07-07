@@ -11,8 +11,8 @@ import (
 // id, so the generic InsertDoc (which strips id + generates one) does not fit —
 // grant/update must save with a caller-chosen `_id`.
 
-// SaveAdminPermission saves a granted permission + is (re)used by
-// updateRole: build an AdminPermission with `_id` = sub-when-known else email, the email, the role,
+// SaveAdminPermission saves a granted permission and is also reused by
+// the role-update path: build an AdminPermission with `_id` = sub-when-known else email, the email, the role,
 // and pending = (sub == "") (a pending grant has no resolved User sub yet). Upserts by `_id`
 // and returns the stored value. Optional blank email/role are omitted
 // from the stored doc so the JSON drops them (a null field is dropped, not stored as "").
@@ -24,7 +24,7 @@ func (r *Repo) SaveAdminPermission(ctx context.Context, sub, email, role string)
 	pending := sub == ""
 
 	// The doc is fully determined by (email, role, pending) — a full-replace upsert is the
-	// faithful equivalent of the previous $set/$unset-with-upsert (blank optionals are absent).
+	// faithful equivalent of the previous set-or-clear upsert (blank optionals are absent).
 	doc := pgdoc.M{"pending": pending}
 	if email != "" {
 		doc["email"] = email
@@ -40,7 +40,7 @@ func (r *Repo) SaveAdminPermission(ctx context.Context, sub, email, role string)
 
 // UpdateAdminPermissionRole overwrites ONLY the role
 // of an existing adminPermission (sub/email/pending untouched). A blank role becomes null (removed)
-// when empty. The caller has already confirmed the doc exists (findById-or-404).
+// when empty. The caller has already confirmed the doc exists (looked up by id → 404 when absent).
 func (r *Repo) UpdateAdminPermissionRole(ctx context.Context, sub, role string) error {
 	var err error
 	if role == "" {

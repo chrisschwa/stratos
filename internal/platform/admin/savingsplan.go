@@ -19,19 +19,18 @@ import (
 // re-registered here (the faithful-DTO upgrade of those reads is out of scope this pass).
 //
 // Endpoints:
-//   - createSavingsPlan: save → single(saved).                      ADMIN_SAVINGS_PLAN_MANAGE
-//   - updateSavingsPlan: getSavingsPlan(404) → overwrite 7 mutable fields → save → single.
-//                                                                    ADMIN_SAVINGS_PLAN_MANAGE
-//   - deleteSavingsPlan: getSavingsPlan(404) → deleteById → void.    ADMIN_SAVINGS_PLAN_MANAGE
-//   - getAvailableSavingsPlansForBillingProfile: findByAvailable(true) filtered by
-//     isEligibleForBillingProfile(bpId) → list.                      ADMIN_SAVINGS_PLAN_READ
+//   - create: store the plan → respond with the saved plan.         ADMIN_SAVINGS_PLAN_MANAGE
+//   - update: load-or-404 → overwrite 7 mutable fields → store.      ADMIN_SAVINGS_PLAN_MANAGE
+//   - delete: load-or-404 → delete by id → empty body.              ADMIN_SAVINGS_PLAN_MANAGE
+//   - available-for-billing-profile: load the available plans, keep
+//     those eligible for the billing profile → list.                ADMIN_SAVINGS_PLAN_READ
 //
-// getSavingsPlan / getAllSavingsPlans are the already-registered reads.
+// The bare list and by-id reads are already registered elsewhere.
 //
-// create/update write audit events; delete calls
-// auditService.auditAdmin. Deferred this pass (// TODO(audit)); state + response are faithful.
+// create/update write audit events, and delete should write an admin audit event too —
+// deferred this pass (// TODO(audit)); state + response are faithful.
 //
-// The admin endpoints return the RAW SavingsPlan document (CustomHttpResponse.single), NOT a
+// The admin endpoints return the RAW SavingsPlan document, NOT a
 // client DTO — but the raw JSON shape (id not _id, money as a JSON number, filters:[] always,
 // no _class) is exactly what billing.SavingsPlanToDto already emits, so the response reuses it.
 
@@ -118,7 +117,7 @@ func tiersToDomain(in []savingsPlanTierReq) []billing.SavingsPlanTier {
 	return out
 }
 
-// savingsPlanCreate handles createSavingsPlan: save → single(saved). ADMIN_SAVINGS_PLAN_MANAGE.
+// savingsPlanCreate stores a new plan and responds with the saved plan. ADMIN_SAVINGS_PLAN_MANAGE.
 func (h *Handler) savingsPlanCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, savingsPlanManagePerm) {
 		return
@@ -133,12 +132,12 @@ func (h *Handler) savingsPlanCreate(w http.ResponseWriter, r *http.Request) {
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): CREATE audit — auditService.auditAdmin(saved, CREATE, PLATFORM)
+	// TODO(audit): write an admin audit event when a plan is created.
 	httpx.OK(w, billing.SavingsPlanToDto(saved))
 }
 
-// savingsPlanUpdate handles updateSavingsPlan: getSavingsPlan(404) → overwrite the 7 mutable fields
-// (available/name/description/targets/savingSchedule/accessMode/billingProfiles) → save → single.
+// savingsPlanUpdate loads the plan (404 if absent), overwrites the 7 mutable fields
+// (available/name/description/targets/savingSchedule/accessMode/billingProfiles), and stores it.
 // ADMIN_SAVINGS_PLAN_MANAGE. id/createdAt/updatedAt are preserved (not overwritten).
 func (h *Handler) savingsPlanUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, savingsPlanManagePerm) {
@@ -170,14 +169,14 @@ func (h *Handler) savingsPlanUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.ReplaceSavingsPlan(r.Context(), savingsPlanCollection, id, *existing); httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE audit: field-level diff (middleware computes diffSnapshots(before, after)).
+	// UPDATE audit: field-level diff (the audit middleware compares the before/after snapshots).
 	after, _ := h.repo.FindDoc(r.Context(), savingsPlanCollection, id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, billing.SavingsPlanToDto(existing))
 }
 
-// savingsPlanDelete handles deleteSavingsPlan: getSavingsPlan(404) → deleteById → void. The
-// handler returns `void` → HTTP 200 with an empty
+// savingsPlanDelete loads the plan (404 if absent) and deletes it by id. The
+// handler returns an empty HTTP 200
 // body. ADMIN_SAVINGS_PLAN_MANAGE.
 func (h *Handler) savingsPlanDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, savingsPlanManagePerm) {
@@ -195,12 +194,12 @@ func (h *Handler) savingsPlanDelete(w http.ResponseWriter, r *http.Request) {
 	if _, err := h.repo.DeleteSavingsPlan(r.Context(), savingsPlanCollection, id); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditService.auditAdmin(plan, DELETE, PLATFORM)
+	// TODO(audit): write an admin audit event when a plan is deleted.
 	w.WriteHeader(http.StatusOK) // void → HTTP 200, empty body
 }
 
-// savingsPlanAvailable handles getSavingsPlans(billingProfileId): findByAvailable(true) filtered by
-// SavingsPlan.isEligibleForBillingProfile(bpId) → list. ADMIN_SAVINGS_PLAN_READ.
+// savingsPlanAvailable loads the available plans and keeps those eligible for the given
+// billing profile → list. ADMIN_SAVINGS_PLAN_READ.
 func (h *Handler) savingsPlanAvailable(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, savingsPlanReadPerm) {
 		return

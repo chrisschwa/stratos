@@ -14,11 +14,10 @@ import (
 // look up a code, check it has not already been redeemed by the org, mint a PromotionalCredit, and
 // record the redemption. The admin create/update/delete of promotionCode lives in the admin package.
 
-// FindPromotionCodeByCode finds a promotionCode by its `code`, CASE-INSENSITIVELY and trimmed —
-// the lookup is `findFirstByCodeIgnoreCase(code.trim())` (a differently-cased or
-// padded code must still resolve, not spuriously 404). The match is anchored full-string (`^code$`,
-// metachars escaped) so a code containing regex specials can't widen the match. Raw doc (the code
-// carries dynamic validity/target fields); (nil,nil) when none.
+// FindPromotionCodeByCode finds a promotionCode by its `code`, CASE-INSENSITIVELY and trimmed
+// (a differently-cased or padded code must still resolve, not spuriously 404). The match is
+// anchored full-string (`^code$`, metachars escaped) so a code containing regex specials can't
+// widen the match. Raw doc (the code carries dynamic validity/target fields); (nil,nil) when none.
 func (r *Repo) FindPromotionCodeByCode(ctx context.Context, code string) (pgdoc.M, error) {
 	pattern := "^" + regexp.QuoteMeta(strings.TrimSpace(code)) + "$"
 	var doc pgdoc.M
@@ -29,7 +28,7 @@ func (r *Repo) FindPromotionCodeByCode(ctx context.Context, code string) (pgdoc.
 	return doc, nil
 }
 
-// PromotionRedemptionExists checks existsByPromotionCodeIdAndOrganizationId.
+// PromotionRedemptionExists reports whether the org has already redeemed the given promotion code.
 func (r *Repo) PromotionRedemptionExists(ctx context.Context, promotionCodeID, organizationID string) (bool, error) {
 	return r.promoRedeem.Exists(ctx, pgdoc.M{
 		"promotionCodeId": promotionCodeID, "organizationId": organizationID,

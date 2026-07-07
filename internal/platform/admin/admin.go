@@ -2,7 +2,7 @@
 // Admin auth reuses the SAME OIDC token as the client API (no separate realm): a request is
 // "admin" iff the authenticated sub has an `adminPermission` document. The doc's role resolves
 // to a granted permission-pattern set (built-in roles below, or a custom adminRole — deferred);
-// endpoints gate on an AdminPermissionEnum key via the shared wildcard matcher (`admin:*` etc.).
+// endpoints gate on an admin-permission key via the shared wildcard matcher (`admin:*` etc.).
 package admin
 
 import (
@@ -13,7 +13,7 @@ import (
 	"github.com/menlocloud/stratos/pkg/httpx"
 )
 
-// AdminPermission — the adminPermission collection; findById(sub) → _id == sub.
+// AdminPermission — the adminPermission collection; looked up by sub, where _id == sub.
 type AdminPermission struct {
 	Sub     string `json:"id,omitempty"`
 	Email   string `json:"email,omitempty"`
@@ -40,7 +40,7 @@ func (r *Repo) ListRaw(ctx context.Context, collection string) ([]pgdoc.M, error
 	return out, nil
 }
 
-// FindBySub returns the adminPermission for a sub = findById(sub).
+// FindBySub returns the adminPermission whose id equals the given sub.
 func (r *Repo) FindBySub(ctx context.Context, sub string) (*AdminPermission, error) {
 	if sub == "" {
 		return nil, nil
@@ -112,7 +112,7 @@ func (r *Repo) Permissions(ctx context.Context, sub string) ([]string, error) {
 	return rolePermissions(role), nil
 }
 
-// AllPermissionKeys is the full AdminPermissionEnum key set; the
+// AllPermissionKeys is the full admin-permission key set; the
 // /admin/me expanded-permission list comes from filtering this by the granted patterns.
 var AllPermissionKeys = []string{
 	"admin:account_credit:manage", "admin:account_credit:read", "admin:audit:read",
@@ -134,16 +134,16 @@ var AllPermissionKeys = []string{
 	"admin:user:manage_credentials", "admin:user:read", "admin:user:update",
 }
 
-// PermissionMeta is one {key, description} entry of the AdminPermissionEnum metadata
-// (listAvailablePermissions → a list of {key, description} maps).
+// PermissionMeta is one {key, description} entry of the admin-permission metadata
+// (the available-permissions list → a list of {key, description} maps).
 type PermissionMeta struct {
 	Key         string `json:"key"`
 	Description string `json:"description"`
 }
 
-// AdminPermissionMeta is the full AdminPermissionEnum metadata in declaration order, each mapped to
+// AdminPermissionMeta is the full admin-permission metadata in declaration order, each mapped to
 // {key, description}. Order is irrelevant for comparison (the harness sorts arrays) but kept in the
-// enum's declaration order.
+// original declaration order.
 var AdminPermissionMeta = []PermissionMeta{
 	{"admin:user:read", "View user details"},
 	{"admin:user:create", "Create users"},
@@ -203,7 +203,7 @@ var AdminPermissionMeta = []PermissionMeta{
 	{"admin:stats:read", "View statistics"},
 }
 
-// ListBankTransfers = findAllByPaymentGatewayIdOrderByCreatedAtDesc.
+// ListBankTransfers returns the bank transfers for a payment gateway, newest first.
 // Raw-domain passthrough (empty under greenfield → []; populated DTO shaping deferred, fails loud).
 func (r *Repo) ListBankTransfers(ctx context.Context, integrationId string) ([]pgdoc.M, error) {
 	out := []pgdoc.M{}
@@ -214,13 +214,13 @@ func (r *Repo) ListBankTransfers(ctx context.Context, integrationId string) ([]p
 	return out, nil
 }
 
-// BankTransferByID = findById(id); nil when
+// BankTransferByID looks up a bank transfer by id; nil when
 // absent (the caller maps that to the 404 "Bank transfer %s not found ").
 func (r *Repo) BankTransferByID(ctx context.Context, id string) (pgdoc.M, error) {
 	return r.FindByIDRaw(ctx, "bankTransfer", id)
 }
 
-// FindByIDRaw is a generic findById over any collection → raw pgdoc.M, or (nil,nil) when absent.
+// FindByIDRaw is a generic by-id lookup over any collection → raw pgdoc.M, or (nil,nil) when absent.
 // Backs the admin by-id reads. Ids are plain strings (the id column); a malformed/unknown id is
 // simply "not found".
 func (r *Repo) FindByIDRaw(ctx context.Context, collection, id string) (pgdoc.M, error) {
@@ -247,7 +247,7 @@ func (r *Repo) CountDocs(ctx context.Context, collection string) (int64, error) 
 }
 
 // InstalledThirdParties returns the set of `thirdParty` values present in the thirdPartyIntegration
-// collection (batched existsByThirdParty). Backs the integrations/stats `installed` flag.
+// collection (one existence check per third party). Backs the integrations/stats `installed` flag.
 func (r *Repo) InstalledThirdParties(ctx context.Context) (map[string]bool, error) {
 	vals, err := r.c("thirdPartyIntegration").Distinct(ctx, "thirdParty", nil)
 	if err != nil {
@@ -268,7 +268,7 @@ type ThirdPartyStats struct {
 }
 
 // ThirdPartyCatalog is the static set of integration definitions across all third-party factories
-// (installed=existsByThirdParty → false under greenfield). Includes the intentional duplicates
+// (installed → false under greenfield, since nothing is configured). Includes the intentional duplicates
 // (Stripe/WHMCS/Chatwoot/Crisp/Intercom registered by more than one factory). Order is irrelevant
 // (the harness sorts arrays). `installed` is always false here (no integration is configured yet).
 var ThirdPartyCatalog = []ThirdPartyStats{
@@ -361,7 +361,7 @@ func (r *Repo) OrganizationsByMemberSub(ctx context.Context, sub string) ([]pgdo
 	return r.ListRawFiltered(ctx, "organization", pgdoc.M{"_id": pgdoc.M{"$in": ids}})
 }
 
-// ExpandPatterns returns every AdminPermissionEnum key
+// ExpandPatterns returns every admin-permission key
 // matched by any granted pattern (admin:* → all 58 keys).
 func ExpandPatterns(patterns []string) []string {
 	out := make([]string, 0, len(AllPermissionKeys))
@@ -373,7 +373,7 @@ func ExpandPatterns(patterns []string) []string {
 	return out
 }
 
-// RequirePermission gates an admin endpoint on an AdminPermissionEnum key (e.g.
+// RequirePermission gates an admin endpoint on an admin-permission key (e.g.
 // "admin:flavor_category:manage"): 403 unless the sub's granted patterns match.
 func (r *Repo) RequirePermission(ctx context.Context, sub, key string) error {
 	perms, err := r.Permissions(ctx, sub)

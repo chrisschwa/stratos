@@ -17,7 +17,7 @@ type AdminInsights struct {
 	NewBillingProfiles   []DailyCountDetails `json:"newBillingProfiles"`
 }
 
-// AdminStatsResponse is the getStats response payload.
+// AdminStatsResponse is the admin-stats response payload.
 type AdminStatsResponse struct {
 	Users                   int64         `json:"users"`
 	Projects                int64         `json:"projects"`
@@ -31,7 +31,7 @@ type AdminStatsResponse struct {
 	Insights                AdminInsights `json:"insights"`
 }
 
-// adminStats handles getStats: live counts + configured flags + the insight
+// adminStats returns live counts + configured flags + the insight
 // buckets (MRR bills/payments + new users/billing-profiles, computed by buildInsights). All real.
 func (h *Handler) adminStats(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:stats:read") {
@@ -39,8 +39,8 @@ func (h *Handler) adminStats(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	count := func(c string) int64 { n, _ := h.repo.CountDocs(ctx, c); return n }
-	// mailGatewayConfigured = !listIntegrationsByCategory("Mail").isEmpty() — a Mail-category catalog
-	// entry (SMTP/Mailgun/…) has an installed thirdPartyIntegration doc.
+	// mailGatewayConfigured is true when some Mail-category catalog entry (SMTP/Mailgun/…)
+	// has an installed thirdPartyIntegration doc.
 	mailConfigured := false
 	if installed, err := h.repo.InstalledThirdParties(ctx); err == nil {
 		for _, e := range ThirdPartyCatalog {
@@ -55,7 +55,7 @@ func (h *Handler) adminStats(w http.ResponseWriter, r *http.Request) {
 		Users:          count("users"),
 		Projects:       count("project"),
 		CloudResources: count("cloudResource"),
-		// accountCreditTransactionAdminService.count() + collectTransactionAdminService.count().
+		// Total transactions = account-credit transactions + collect transactions.
 		Transactions:            count("accountCreditTransaction") + count("collectTransaction"),
 		CloudProviderConfigured: count("externalService") > 0,
 		BillingConfigured:       count("billingConfiguration") > 0,

@@ -1,7 +1,7 @@
 package admin
 
 // promotioncode_repo.go holds the PromotionCode-specific repo method the generic crud.go helpers do
-// not cover: a case-insensitive code-exists check (existsByCodeIgnoreCase).
+// not cover: a case-insensitive check for whether a code already exists.
 
 import (
 	"context"
@@ -10,10 +10,9 @@ import (
 	"github.com/menlocloud/stratos/internal/pgdoc"
 )
 
-// PromotionCodeExistsByCode reports existence by code (existsByCodeIgnoreCase): true when any
-// promotionCode doc has a `code` equal to the given value, case-insensitively. Matched with an
-// anchored, case-insensitive regex over the QuoteMeta'd code (so the code is matched literally, not
-// as a pattern).
+// PromotionCodeExistsByCode reports whether any promotionCode doc has a `code` equal to the given
+// value, case-insensitively. Matched with an anchored, case-insensitive regex over the QuoteMeta'd
+// code (so the code is matched literally, not as a pattern).
 func (r *Repo) PromotionCodeExistsByCode(ctx context.Context, code string) (bool, error) {
 	pattern := "^" + regexp.QuoteMeta(code) + "$"
 	filter := pgdoc.M{"code": pgdoc.M{"$regex": pattern, "$options": "i"}}

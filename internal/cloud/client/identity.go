@@ -87,8 +87,7 @@ type KeystoneProject struct {
 	Enabled     bool   `json:"enabled"`
 }
 
-// ListAllProjects lists EVERY keystone project (admin-scope read). Ports
-// OpenstackProjectService.listAllProjects (getAdminIdentityService().projects().list()).
+// ListAllProjects lists EVERY keystone project (admin-scope read).
 func (c *Client) ListAllProjects(ctx context.Context) ([]KeystoneProject, error) {
 	ic, err := openstack.NewIdentityV3(c.provider, c.endpointOpts())
 	if err != nil {

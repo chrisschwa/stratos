@@ -1,10 +1,9 @@
 package admin
 
-// clientarea_reads.go serves the admin "Client Area" LIST/detail reads that return RICH,
-// joined DTOs (not the bare domain): listProjects → ProjectAdminDto (project +
-// organization + usedVcpus/Ram/BlockStorage), getBills → BillAdminDto (bill +
-// billingProfile) + getBill → BillFinancialOverview (recomputed net/gross/unpaid), and
-// getCloudResources → AggregatedCloudResource (resource + project,
+// clientarea_reads.go serves the admin "Client Area" LIST/detail reads that return rich,
+// joined rows (not the bare domain): the project list (project + organization +
+// usedVcpus/Ram/BlockStorage), the bill list (bill + billing profile), the bill financial
+// overview (recomputed net/gross/unpaid), and the cloud-resource list (resource + project,
 // reduced projection). Without these the admin tables render rows missing their joined/computed
 // columns. Money is emitted as JSON numbers, not the quoted decimal strings a
 // raw document passthrough produces.
@@ -60,7 +59,7 @@ func decodeTyped(doc pgdoc.M, out any) error {
 	return pgdoc.Unmarshal(body, id, out)
 }
 
-// ListRawSorted is ListRaw with a single-field sort (the admin aggregations sort createdAt/_id DESC).
+// ListRawSorted is ListRaw with a single-field sort (the admin list reads sort createdAt/_id DESC).
 func (r *Repo) ListRawSorted(ctx context.Context, collection, field string, dir int) ([]pgdoc.M, error) {
 	out := []pgdoc.M{}
 	if err := r.c(collection).Find(ctx, nil, &out, pgdoc.Sort(sortKeyFor(field, dir))); err != nil {
@@ -69,10 +68,10 @@ func (r *Repo) ListRawSorted(ctx context.Context, collection, field string, dir 
 	return out, nil
 }
 
-// projectAdminList handles listProjects / getProjectsWithBillingProfiles: every
-// project as a ProjectAdminDto = the project doc + the joined `organization` + usedVcpus/usedRam/
-// usedBlockStorage (computed cloud usage — 0 with no live metrics), sorted createdAt DESC. NB despite
-// the name, the aggregation joins ONLY organization (billingProfile is NOT populated here).
+// projectAdminList returns every project enriched for the admin table: the project doc + the
+// joined `organization` + usedVcpus/usedRam/usedBlockStorage (computed cloud usage — 0 with no
+// live metrics), sorted createdAt DESC. NB despite the name, only organization is joined here
+// (billingProfile is NOT populated).
 func (h *Handler) projectAdminList(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:project:read") {
 		return
@@ -98,8 +97,8 @@ func (h *Handler) projectAdminList(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, out)
 }
 
-// billAdminList handles getBills / getBillsWithBillingProfiles: every bill as a
-// BillAdminDto = the bill doc (money as numbers) + the joined `billingProfile`, sorted createdAt DESC.
+// billAdminList returns every bill for the admin table: the bill doc (money as numbers) + the
+// joined `billingProfile`, sorted createdAt DESC.
 func (h *Handler) billAdminList(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:bill:read") {
 		return
@@ -122,11 +121,10 @@ func (h *Handler) billAdminList(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, out)
 }
 
-// billingProfileAdminList handles getBillingProfiles /
-// getBillingProfilesWithBalances: every profile as an AggregatedBillingProfile = the profile doc +
+// billingProfileAdminList returns every billing profile for the admin table: the profile doc +
 // the 6 computed financials (balance/accountCredit/promotionalCredit via the balance layer;
 // currentMonth/lastMonth/forecastedMonthEnd default 0 — usage metering is not available without live
-// cloud metrics, and the computed-fields aggregation framework is not wired in). Sorted _id DESC.
+// cloud metrics, and the per-field usage rollups are not wired in). Sorted _id DESC.
 func (h *Handler) billingProfileAdminList(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:billing_profile:read") {
 		return
@@ -155,7 +153,7 @@ func (h *Handler) billingProfileAdminList(w http.ResponseWriter, r *http.Request
 				balance = json.Number(v.String())
 			}
 			// This Month / Prev. Month / Forecast — the profile's bill-item net per month (same bill
-			// aggregation as the client cost-info dashboard; forecast = current, prorate deferred).
+			// summation as the client cost-info dashboard; forecast = current, prorate deferred).
 			if bills, err := h.billing.BillsByBillingProfile(r.Context(), id); err == nil {
 				cur, lst := billing.MonthlyBillCosts(bills, now)
 				currentMonth = json.Number(cur.String())
@@ -174,10 +172,10 @@ func (h *Handler) billingProfileAdminList(w http.ResponseWriter, r *http.Request
 	httpx.List(w, out)
 }
 
-// billFinancialOverview builds a BillFinancialOverview: recompute net (product
+// billFinancialOverview builds the bill financial overview: recompute net (product
 // currency, with adjustments), gross + unpaid-gross (taxed → FX'd to the profile currency) through
 // the golden-tested pricing engine, and shape the bill's own fields (money as numbers). The result
-// is the BillFinancialOverview field set (year/month default 0; currency = the base currency).
+// is the overview field set (year/month default 0; currency = the base currency).
 func (h *Handler) billFinancialOverview(ctx context.Context, billDoc pgdoc.M) (pgdoc.M, error) {
 	var bill pricing.Bill
 	if err := decodeTyped(billDoc, &bill); err != nil {

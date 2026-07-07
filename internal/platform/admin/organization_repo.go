@@ -4,7 +4,7 @@ package admin
 // helpers do not cover: org reads, the organization_members membership operations
 // (the members live in a SEPARATE `organization_members` collection — {organizationId, sub, roles}),
 // project-count, and a users-by-_id resolve. Covers the organization, membership, project, and
-// user reads the organization admin service calls.
+// user reads the organization admin endpoints need.
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 	"github.com/menlocloud/stratos/internal/pgdoc"
 )
 
-// OrgFindByID loads an organization by id (findById);
+// OrgFindByID loads an organization by id;
 // returns (nil,nil) when absent (the caller maps that to 404 "Organization not found").
 func (r *Repo) OrgFindByID(ctx context.Context, id string) (pgdoc.M, error) {
 	return r.FindDoc(ctx, "organization", id)
@@ -30,7 +30,7 @@ func (r *Repo) OrgReplace(ctx context.Context, id string, doc pgdoc.M) error {
 	return r.ReplaceDoc(ctx, "organization", id, doc)
 }
 
-// OrgDelete deletes an organization doc by id (organizationRepository.delete).
+// OrgDelete deletes an organization doc by id.
 func (r *Repo) OrgDelete(ctx context.Context, id string) error {
 	_, err := r.c("organization").DeleteByID(ctx, id)
 	return err
@@ -117,7 +117,7 @@ func (r *Repo) OrgDeleteAllMembers(ctx context.Context, orgID string) error {
 	return err
 }
 
-// UserByID loads a user by id (findById); returns (nil,nil) for a malformed/absent id.
+// UserByID loads a user by id; returns (nil,nil) for a malformed/absent id.
 func (r *Repo) UserByID(ctx context.Context, id string) (pgdoc.M, error) {
 	return r.FindDoc(ctx, "users", id)
 }

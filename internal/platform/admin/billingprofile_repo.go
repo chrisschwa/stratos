@@ -12,9 +12,9 @@ import (
 
 // ExistsByBillingProfileID reports whether any document in `collection` references `billingProfileId`
 // (a top-level `billingProfileId` field). Backs the DELETE in-use guards:
-//   - bill        → BillAdminService.isBillingProfileInUse (bill.existsByBillingProfileId)
-//   - project     → ProjectAdminService.isBillingProfileInUse (project.existsByBillingProfileId)
-//   - creditCard  → CreditCardService.existsCardsByBillingProfile (creditCard.existsByBillingProfileId)
+//   - bill        → is the profile referenced by any bill?
+//   - project     → is the profile referenced by any project?
+//   - creditCard  → is the profile referenced by any credit card?
 //
 // billingProfileId is stored as the hex string on these collections (it is the BillingProfile's String
 // id), so the filter matches the raw string — no id coercion.

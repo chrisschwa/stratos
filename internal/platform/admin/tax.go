@@ -24,8 +24,8 @@ import (
 // [{level:int,percentage:int}], level (BUSINESS_ONLY|CONSUMERS_ONLY|ALL), name, state, country,
 // startDate, endDate, accessMode (PUBLIC|SCOPED), startDateEnabled, endDateEnabled. The FE also POSTs
 // companyConstraint/allCountries — NOT entity fields, so they are dropped on serialization; we drop them too.
-// create/update emit audit events; delete calls auditService.auditAdmin — the group
-// auditMiddleware already auto-emits an ADMIN_AREA/PLATFORM event per 2xx mutation (TODO(audit):
+// create/update emit audit events, and delete should write an admin audit event too — the group
+// audit middleware already auto-emits an ADMIN_AREA/PLATFORM event per 2xx mutation (TODO(audit):
 // field-level before/after diff deferred, matching the other mutations).
 
 const taxPerm = "admin:tax:manage"
@@ -46,8 +46,8 @@ type taxLevelReq struct {
 }
 
 // taxRateReq holds the mutable fields of TaxRate. country/startDate/endDate/level
-// are pointers so a null vs an absent field can drive the null omission (a stored null →
-// `country: is(null)` selection still matches absent on the read path).
+// are pointers so a null vs an absent field can drive the null omission (a stored null
+// still matches an absent-country filter on the read path).
 type taxRateReq struct {
 	Name             string        `json:"name"`
 	State            string        `json:"state"`
@@ -94,8 +94,8 @@ func (req taxRateReq) doc() pgdoc.M {
 	return d
 }
 
-// taxCreate handles create(): level required → save → single(saved). The driver
-// assigns the _id (save with a null id).
+// taxCreate stores a new tax rate (level required) and responds with the saved rate. The store
+// assigns the _id (insert with no id).
 func (h *Handler) taxCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, taxPerm) {
 		return
@@ -117,9 +117,9 @@ func (h *Handler) taxCreate(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, shapeDoc(saved))
 }
 
-// taxUpdate handles update(): get-or-404 → overwrite name, rateLevels, level, country,
-// startDate, endDate, startDateEnabled, endDateEnabled, accessMode (state is NOT touched) →
-// save → single. Drop the updated keys first so an omitted/null field becomes absent (nulls omitted).
+// taxUpdate loads the tax rate (404 if absent), overwrites name, rateLevels, level, country,
+// startDate, endDate, startDateEnabled, endDateEnabled, accessMode (state is NOT touched), and
+// stores it. Drop the updated keys first so an omitted/null field becomes absent (nulls omitted).
 func (h *Handler) taxUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, taxPerm) {
 		return
@@ -143,20 +143,20 @@ func (h *Handler) taxUpdate(w http.ResponseWriter, r *http.Request) {
 		delete(existing, k)
 	}
 	ud := req.doc()
-	delete(ud, "state") // update does not call setState — leave the persisted state untouched.
+	delete(ud, "state") // update never changes state — leave the persisted state untouched.
 	for k, v := range ud {
 		existing[k] = v
 	}
 	if err := h.repo.ReplaceDoc(r.Context(), taxCollection, id, existing); httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE audit: field-level diff (middleware computes diffSnapshots(before, after)).
+	// UPDATE audit: field-level diff (the audit middleware compares the before/after snapshots).
 	after, _ := h.repo.FindDoc(r.Context(), taxCollection, id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// taxDelete handles delete(): get-or-404 → if accessMode==SCOPED and any billingProfile
+// taxDelete loads the tax rate (404 if absent): if accessMode==SCOPED and any billingProfile
 // references it (taxConfiguration.taxRuleId == id) → 400; else delete → 202 Accepted (no body).
 func (h *Handler) taxDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, taxPerm) {
@@ -172,7 +172,7 @@ func (h *Handler) taxDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if mode, _ := existing["accessMode"].(string); mode == "SCOPED" {
-		// findBillingProfilesByTaxRuleId(id): billingProfile.taxConfiguration.taxRuleId == id.
+		// Count billing profiles whose taxConfiguration.taxRuleId equals this id.
 		n, err := h.repo.CountBy(r.Context(), "billingProfile", pgdoc.M{"taxConfiguration.taxRuleId": id})
 		if httpx.WriteError(w, err) {
 			return
@@ -185,6 +185,6 @@ func (h *Handler) taxDelete(w http.ResponseWriter, r *http.Request) {
 	if _, err := h.repo.DeleteDoc(r.Context(), taxCollection, id); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditService.auditAdmin(taxRate, DELETE, PLATFORM)
+	// TODO(audit): write an admin audit event when a tax rate is deleted.
 	w.WriteHeader(http.StatusAccepted)
 }

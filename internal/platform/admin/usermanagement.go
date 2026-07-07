@@ -15,33 +15,32 @@ import (
 )
 
 // usermanagement.go implements the user-management surface (/api/v1/admin/user-management).
-// Follows the custommenu.go/banktransfer.go references: exact
+// Same conventions as the custommenu.go/banktransfer.go handlers: exact
 // perms / error strings / response envelopes, id-aware CRUD via the crud.go helpers,
 // `_id`→`id` shaping on the way out.
 //
-// Call graph:
+// Routes:
 //
-//	GET    /credentials?sub=          listCredentialsBySub(sub) = userCredentialRepository.findAllBySub(sub)
-//	                                   → UserCredentialAdminDto.toDto (ADMIN_USER_READ)
-//	DELETE /credentials/{id}?sub=     removeCredential(sub, id): findById-or-404 → sub-mismatch 400
-//	                                   → delete (ADMIN_USER_MANAGE_CREDENTIALS)
-//	PUT    /password?sub=             updateUserPassword(sub, newPassword): findBySub-or-404 →
-//	                                   userCredentialService.replacePassword (ADMIN_USER_MANAGE_CREDENTIALS)
+//	GET    /credentials?sub=          list a user's credentials by sub
+//	                                   → credential DTO list (admin:user:read)
+//	DELETE /credentials/{id}?sub=     load by id or 404 → 400 on sub mismatch
+//	                                   → delete (admin:user:manage_credentials)
+//	PUT    /password?sub=             find the user by sub or 404 →
+//	                                   replace the stored password credential (admin:user:manage_credentials)
 //
 // All three legs are pure datastore over the userCredential table and are handled FULLY —
-// updateUserPassword's replacePassword (UserCredentialService: delete all PASSWORD creds for the
-// sub + save a fresh bcrypt-hashed one) is the LOCAL password store, not an external identity
-// call (the local auth = an embedded authorization server over these same docs). The
-// deployed login path is Keycloak, so this store is reference-state only.
+// the password replace (delete all PASSWORD creds for the sub + save a fresh bcrypt-hashed
+// one) is the LOCAL password store, not an external identity call (the local auth is an
+// embedded authorization server over these same docs). The deployed login path is Keycloak,
+// so this store is reference-state only.
 //
-// The service also writes audit events (auditService.logAsync / auditAdmin) on remove + password-reset —
-// deferred this pass (// TODO(audit)); the persisted state + response are faithful.
+// Remove + password-reset should also write admin audit events — deferred this pass
+// (// TODO(audit)); the persisted state + response are faithful.
 
 const userManagementReadPerm = "admin:user:read"
 const userManagementManageCredentialsPerm = "admin:user:manage_credentials"
 
-// userCredentialCollection is the default collection for the UserCredential domain (no
-// document-name override → uncapitalized class name).
+// userCredentialCollection is the storage collection for user-credential documents.
 const userCredentialCollection = "userCredential"
 
 // replacePasswordCredential replaces the password credential: delete every PASSWORD
@@ -82,7 +81,7 @@ type userCredentialTotpDto struct {
 }
 
 // userCredentialAdminDto is the credential wire shape. password/totp are pointers so a null
-// sub-object is omitted, and toDto only builds them when the source
+// sub-object is omitted, and the mapper only builds them when the source
 // field is non-null. createdAt/updatedAt are passed through as the stored value (the
 // normalizer masks `*At`); omitted when absent.
 type userCredentialAdminDto struct {
@@ -99,8 +98,8 @@ type userCredentialAdminDto struct {
 //   - password sub-object present (non-null) → {configured: password.hash != null}
 //   - totp sub-object present (non-null)     → {verified, deviceName}
 //
-// `id` is the stored `_id` (a plain hex string). The `_class`
-// discriminator and the raw password/totp/webAuthn material never reach the wire.
+// `id` is the stored `_id` (a plain hex string). The internal type-discriminator
+// field and the raw password/totp/webAuthn material never reach the wire.
 func userCredentialToDto(doc pgdoc.M) userCredentialAdminDto {
 	dto := userCredentialAdminDto{
 		Sub:       asString(doc["sub"]),
@@ -144,7 +143,7 @@ func asBool(v any) bool {
 	return b
 }
 
-// userManagementListCredentials handles listCredentials: findAllBySub(sub) → DTO list (ADMIN_USER_READ).
+// userManagementListCredentials lists a user's credentials by sub → DTO list (admin:user:read).
 func (h *Handler) userManagementListCredentials(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, userManagementReadPerm) {
 		return
@@ -161,9 +160,9 @@ func (h *Handler) userManagementListCredentials(w http.ResponseWriter, r *http.R
 	httpx.List(w, dtos)
 }
 
-// userManagementRemoveCredential handles removeCredential (ADMIN_USER_MANAGE_CREDENTIALS):
-// findById-or-404 "Credential not found" → sub-mismatch 400 "Credential does not belong to the
-// specified user" → delete → success("Successful operation").
+// userManagementRemoveCredential deletes one credential (admin:user:manage_credentials):
+// load by id or 404 "Credential not found" → 400 "Credential does not belong to the
+// specified user" on sub mismatch → delete → success("Successful operation").
 func (h *Handler) userManagementRemoveCredential(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, userManagementManageCredentialsPerm) {
 		return
@@ -185,14 +184,14 @@ func (h *Handler) userManagementRemoveCredential(w http.ResponseWriter, r *http.
 	if _, err := h.repo.DeleteDoc(r.Context(), userCredentialCollection, credentialID); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): logAsync(adminEventFromContext DELETE USER resourceId=sub
-	//              metadata{credentialId,credentialType} SUCCESS)
+	// TODO(audit): write an admin audit event (DELETE USER, resourceId=sub,
+	//              metadata{credentialId,credentialType}, SUCCESS) when a credential is deleted.
 	httpx.OK(w, "Successful operation")
 }
 
-// userManagementUpdatePassword handles updateUserPassword (ADMIN_USER_MANAGE_CREDENTIALS):
-// findBySubOrderByCreatedAtDesc-or-404 "User not found", then replacePassword (bcrypt-hash
-// + rewrite the PASSWORD credential, an identity op). The body's newPassword is required
+// userManagementUpdatePassword resets a user's password (admin:user:manage_credentials):
+// find the user by sub (newest credential first) or 404 "User not found", then bcrypt-hash
+// and rewrite the PASSWORD credential (an identity op). The body's newPassword is required
 // (validation 400 on blank) — replicated as a 400 before the write.
 func (h *Handler) userManagementUpdatePassword(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, userManagementManageCredentialsPerm) {
@@ -219,7 +218,7 @@ func (h *Handler) userManagementUpdatePassword(w http.ResponseWriter, r *http.Re
 		httpx.WriteError(w, httpx.NotFound("User not found"))
 		return
 	}
-	// UserCredentialService.replacePassword: delete every PASSWORD credential for the sub, then
+	// Replace the password credential: delete every PASSWORD credential for the sub, then
 	// save a fresh one {sub, type:PASSWORD, password:{hash:<bcrypt>}, createdAt} (the
 	// password encoder is BCrypt). Persisted-state faithful; note the DEPLOYED login
 	// path is Keycloak, so this credential doc is the reference store, not the live login secret.
@@ -230,6 +229,6 @@ func (h *Handler) userManagementUpdatePassword(w http.ResponseWriter, r *http.Re
 	if err := h.repo.replacePasswordCredential(r.Context(), sub, string(hash)); httpx.WriteError(w, err) {
 		return
 	}
-	// PASSWORD_RESET audit (auditAdmin PLATFORM — the middleware emits the admin event).
+	// PASSWORD_RESET admin audit event — emitted by the middleware.
 	httpx.OK(w, "Successful operation")
 }

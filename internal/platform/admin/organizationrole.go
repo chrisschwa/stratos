@@ -8,11 +8,11 @@ package admin
 // response envelopes.
 //
 // Every endpoint gates on ADMIN_ORGANIZATION_MANAGE_ROLES (admin:organization:manage_roles). The
-// create/update/delete write audit events via AuditService.logAsync — deferred this pass
+// create/update/delete should write async admin audit events — deferred this pass
 // (// TODO(audit)); the persisted state + responses are faithful, which is what the admin UI drives.
 //
-// RESPONSE SHAPE: the controller returns OrganizationRoleDto.from(role) (NOT the raw domain). The DTO
-// adds `expandedPermissions` (PermissionMatcher.expandPatterns over the role's permissions, key set)
+// RESPONSE SHAPE: the endpoints return the role DTO (NOT the raw stored doc). The DTO
+// adds `expandedPermissions` (the role's permission patterns expanded, key set)
 // and a constant `builtIn:false`. Built via organizationRoleDto() below — a null
 // description / createdAt / updatedAt is omitted, the permission sets are always emitted, builtIn is a
 // primitive always emitted.
@@ -54,7 +54,7 @@ func (h *Handler) routeOrganizationRole(r chi.Router) {
 
 // createOrganizationRoleReq is the create-role request body (name + optional description +
 // permissions). `permissions` is a pointer so an omitted set (null) is distinguishable from an empty
-// one — both fail validatePermissions ("Permissions must not be empty").
+// one — both fail permission validation ("Permissions must not be empty").
 type createOrganizationRoleReq struct {
 	Name        string    `json:"name"`
 	Description *string   `json:"description"`
@@ -113,7 +113,7 @@ func organizationRoleDto(doc pgdoc.M) pgdoc.M {
 	if v, ok := doc["description"]; ok && v != nil {
 		out["description"] = v
 	}
-	// permissions: always emitted (non-null Set). Read as a []string for expansion; fall back to the
+	// permissions: always emitted (never null). Read as a []string for expansion; fall back to the
 	// raw value for the response when it is not a plain string slice.
 	perms := stringSlice(doc["permissions"])
 	if doc["permissions"] != nil {
@@ -134,7 +134,7 @@ func organizationRoleDto(doc pgdoc.M) pgdoc.M {
 
 // (permissions value → []string coercion uses the package-shared stringSlice from adminrole.go.)
 
-// organizationRoleList handles listRoles(): listByOrganization → DTO list. ADMIN_ORGANIZATION_MANAGE_ROLES.
+// organizationRoleList lists an org's roles as DTOs. ADMIN_ORGANIZATION_MANAGE_ROLES.
 func (h *Handler) organizationRoleList(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, organizationRolePerm) {
 		return
@@ -151,8 +151,8 @@ func (h *Handler) organizationRoleList(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, dtos)
 }
 
-// organizationRoleGet handles getRole(): listByOrganization → filter id==roleId → 404 "Role not found".
-// (Intentionally scans the org's roles rather than findById, so a role of another org → 404.)
+// organizationRoleGet returns one of an org's roles by id → 404 "Role not found".
+// (Intentionally scans the org's roles by id, so a role of another org → 404.)
 func (h *Handler) organizationRoleGet(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, organizationRolePerm) {
 		return
@@ -172,10 +172,10 @@ func (h *Handler) organizationRoleGet(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteError(w, httpx.NotFound("Role not found"))
 }
 
-// organizationRoleCreate handles createRole():
+// organizationRoleCreate creates a role:
 //
-//	name.toUpperCase() → validateName → validatePermissions → existsByOrganizationIdAndName 400
-//	→ build OrganizationRole{organizationId,name,description,permissions} → save → DTO.
+//	upper-case the name → validate the name → validate the permissions → reject with 400 when a role
+//	with that name already exists in the org → build and persist the role → return the DTO.
 func (h *Handler) organizationRoleCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, organizationRolePerm) {
 		return
@@ -213,13 +213,13 @@ func (h *Handler) organizationRoleCreate(w http.ResponseWriter, r *http.Request)
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): logAsync(clientUserEvent CREATE ORGANIZATION_ROLE SUCCESS)
+	// TODO(audit): write an async admin audit event for the role creation.
 	httpx.OK(w, organizationRoleDto(saved))
 }
 
-// organizationRoleUpdate handles updateRole():
+// organizationRoleUpdate updates a role:
 //
-//	findById-or-404 "Organization role not found" → if permissions!=null: validate + set →
+//	load by id → 404 "Organization role not found" → if permissions!=null: validate + set →
 //	if description!=null: set → save → DTO.
 //
 // NOTE: the route carries organizationId but the update IGNORES it (looks up by
@@ -259,16 +259,16 @@ func (h *Handler) organizationRoleUpdate(w http.ResponseWriter, r *http.Request)
 	if err := h.repo.ReplaceDoc(r.Context(), organizationRoleCollection, roleID, existing); httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE ORGANIZATION_ROLE: field-level diff (middleware computes diffSnapshots(before, after)).
+	// UPDATE ORGANIZATION_ROLE: record a field-level diff of the before/after snapshots.
 	after, _ := h.repo.FindDoc(r.Context(), organizationRoleCollection, roleID)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, organizationRoleDto(existing))
 }
 
-// organizationRoleDelete handles deleteRole():
+// organizationRoleDelete deletes a role:
 //
-//	findById-or-404 "Organization role not found" → if role.organizationId != organizationId →
-//	404 "Organization role not found" → delete → success("Successful operation").
+//	load by id → 404 "Organization role not found" → if role.organizationId != organizationId →
+//	404 "Organization role not found" → delete → respond "Successful operation".
 func (h *Handler) organizationRoleDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, organizationRolePerm) {
 		return
@@ -290,12 +290,12 @@ func (h *Handler) organizationRoleDelete(w http.ResponseWriter, r *http.Request)
 	if _, err := h.repo.DeleteDoc(r.Context(), organizationRoleCollection, roleID); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): logAsync(clientUserEvent DELETE ORGANIZATION_ROLE SUCCESS)
+	// TODO(audit): write an async admin audit event for the role deletion.
 	httpx.OK(w, "Successful operation")
 }
 
 // roleDocID returns the stored doc's id as a string (the `_id` hex id, or a raw `id`/`_id`
-// string) — used to match getRole's id==roleId scan.
+// string) — used to match the by-id scan.
 func roleDocID(doc pgdoc.M) string {
 	if v, ok := doc["_id"]; ok {
 		return idString(v)

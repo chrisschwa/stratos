@@ -107,14 +107,14 @@ func (r *Repo) BillsByBillingProfile(ctx context.Context, bpID string) ([]pricin
 	return findTyped[pricing.Bill](ctx, r.bills, pgdoc.M{"billingProfileId": bpID})
 }
 
-// SentBills — findAllByBillingProfileIdAndStatus(SENT). The
+// SentBills returns a profile's bills in status SENT — the
 // collect cron's per-bill work-list.
 func (r *Repo) SentBills(ctx context.Context, bpID string) ([]pricing.Bill, error) {
 	return findTyped[pricing.Bill](ctx, r.bills, pgdoc.M{"billingProfileId": bpID, "status": string(pricing.BillStatusSent)})
 }
 
 // PriceAdjustmentRulesByPricePlanIDs returns the ENABLED price-adjustment rules for the given price
-// plans (getApplicableRules: getAllByPricePlanId per plan, filtered to enabled).
+// plans (the rules attached to those plans, filtered to enabled).
 func (r *Repo) PriceAdjustmentRulesByPricePlanIDs(ctx context.Context, pricePlanIDs []string) ([]pricing.PriceAdjustmentRule, error) {
 	if len(pricePlanIDs) == 0 {
 		return nil, nil
@@ -122,20 +122,20 @@ func (r *Repo) PriceAdjustmentRulesByPricePlanIDs(ctx context.Context, pricePlan
 	return findTyped[pricing.PriceAdjustmentRule](ctx, r.priceAdjust, pgdoc.M{"pricePlanId": pgdoc.M{"$in": pricePlanIDs}, "enabled": true})
 }
 
-// DeleteBill removes a bill by id (sendBill's delete-if-zero path). No-op if absent.
+// DeleteBill removes a bill by id (the delete-if-zero path when sending a bill). No-op if absent.
 func (r *Repo) DeleteBill(ctx context.Context, id string) error {
 	_, err := r.bills.DeleteByID(ctx, id)
 	return err
 }
 
-// AllBills — every bill (platform-wide), for the admin Dashboard insight aggregation
-// (InsightsService current-month costs across all profiles).
+// AllBills — every bill (platform-wide), for the admin dashboard's current-month
+// cost insight across all profiles.
 func (r *Repo) AllBills(ctx context.Context) ([]pricing.Bill, error) {
 	return findTyped[pricing.Bill](ctx, r.bills, pgdoc.M{})
 }
 
-// AllBillingProfiles — every profile (findAll). The collect cron fans out over
-// every profile (NOT only ACTIVE — collectBills skips SUSPENDED in the service).
+// AllBillingProfiles — every profile. The collect cron fans out over
+// every profile (NOT only ACTIVE — the collect job skips SUSPENDED).
 func (r *Repo) AllBillingProfiles(ctx context.Context) ([]BillingProfile, error) {
 	return findTyped[BillingProfile](ctx, r.profiles, pgdoc.M{})
 }
@@ -146,9 +146,9 @@ func (r *Repo) PromotionalCreditsByBillingProfile(ctx context.Context, bpID stri
 	return findTyped[pricing.PromotionalCredit](ctx, r.promoCredit, pgdoc.M{"billingProfileId": bpID})
 }
 
-// CollectTransactionsByBillingProfile
-// = findAllDescByBillingProfileIdAndStatusIsIn(SUCCESS, FAILED), createdAt DESC. Only the
-// terminal-outcome transactions are returned (PENDING/CANCELLED are excluded).
+// CollectTransactionsByBillingProfile returns a profile's SUCCESS/FAILED collect transactions,
+// newest first. Only the terminal-outcome transactions are returned (PENDING/CANCELLED are
+// excluded).
 func (r *Repo) CollectTransactionsByBillingProfile(ctx context.Context, bpID string) ([]pricing.CollectTransaction, error) {
 	filter := pgdoc.M{
 		"billingProfileId": bpID,
@@ -173,8 +173,8 @@ func (r *Repo) SavingsContractsByBillingProfile(ctx context.Context, bpID string
 	return findTyped[SavingsContract](ctx, r.savingCtrs, pgdoc.M{"billingProfileId": bpID})
 }
 
-// AllSavingsContracts — findAll(); the expiration cron
-// loads every contract then filters ACTIVE + endDate<now in the service.
+// AllSavingsContracts — every savings contract; the expiration cron
+// loads them all then filters ACTIVE + endDate<now in the service.
 func (r *Repo) AllSavingsContracts(ctx context.Context) ([]SavingsContract, error) {
 	return findTyped[SavingsContract](ctx, r.savingCtrs, pgdoc.M{})
 }
@@ -244,7 +244,7 @@ func (r *Repo) AvailableSavingsPlans(ctx context.Context) ([]SavingsPlan, error)
 	return findTyped[SavingsPlan](ctx, r.savingPlans, pgdoc.M{"available": true})
 }
 
-// SavingsContractByID — findById → 404. nil if absent / bad id.
+// SavingsContractByID loads one savings contract by id → 404. nil if absent / bad id.
 func (r *Repo) SavingsContractByID(ctx context.Context, id string) (*SavingsContract, error) {
 	var c SavingsContract
 	found, err := r.savingCtrs.Get(ctx, id, &c)
@@ -254,14 +254,14 @@ func (r *Repo) SavingsContractByID(ctx context.Context, id string) (*SavingsCont
 	return &c, nil
 }
 
-// ExistsActiveSavingsContract — existsBySavingsPlanIdAndBillingProfileIdAndStatus(plan,bp,ACTIVE).
+// ExistsActiveSavingsContract reports whether the profile already has an ACTIVE contract for the plan.
 func (r *Repo) ExistsActiveSavingsContract(ctx context.Context, planID, bpID string) (bool, error) {
 	return r.savingCtrs.Exists(ctx, pgdoc.M{
 		"savingsPlanId": planID, "billingProfileId": bpID, "status": SavingsStatusActive,
 	})
 }
 
-// AvailableSavingsPlanByID — findById + available.
+// AvailableSavingsPlanByID loads a savings plan by id, only when it's marked available.
 // nil if absent or not available (the handler maps to 404).
 func (r *Repo) AvailableSavingsPlanByID(ctx context.Context, id string) (*SavingsPlan, error) {
 	var p SavingsPlan
@@ -272,7 +272,7 @@ func (r *Repo) AvailableSavingsPlanByID(ctx context.Context, id string) (*Saving
 	return &p, nil
 }
 
-// AccountCreditTransactionByID — get(id) = findById.
+// AccountCreditTransactionByID loads one account-credit transaction by id.
 // Returns nil when missing (handler maps to the interpolated 404) or when the id is
 // unknown. Typed (money → decimal); nested invoiceDetails/accountCredit kept raw.
 func (r *Repo) AccountCreditTransactionByID(ctx context.Context, id string) (*AccountCreditTransaction, error) {
@@ -284,9 +284,9 @@ func (r *Repo) AccountCreditTransactionByID(ctx context.Context, id string) (*Ac
 	return &doc, nil
 }
 
-// ListAccountCreditTransactions
-// = findAllByBillingProfileIdAndStatusIsIn(SUCCESS, FAILED), createdAt DESC (same status filter
-// as collect: PENDING/CANCELLED excluded). Typed (money → decimal codec).
+// ListAccountCreditTransactions returns a profile's SUCCESS/FAILED account-credit transactions,
+// newest first (same status filter as collect: PENDING/CANCELLED excluded). Typed
+// (money → decimal codec).
 func (r *Repo) ListAccountCreditTransactions(ctx context.Context, bpID string) ([]AccountCreditTransaction, error) {
 	filter := pgdoc.M{
 		"billingProfileId": bpID,
@@ -296,8 +296,7 @@ func (r *Repo) ListAccountCreditTransactions(ctx context.Context, bpID string) (
 		pgdoc.Sort(pgdoc.DescK("createdAt", pgdoc.KTime)))
 }
 
-// AllAccountCreditTransactionsByProfile —
-// findAllByBillingProfileIdOrderByCreatedAtDesc
+// AllAccountCreditTransactionsByProfile — a profile's account-credit transactions, newest first
 // (ALL statuses, unlike the client list). Empty for a no-txn profile.
 func (r *Repo) AllAccountCreditTransactionsByProfile(ctx context.Context, bpID string) ([]AccountCreditTransaction, error) {
 	return findTyped[AccountCreditTransaction](ctx, r.credits, pgdoc.M{"billingProfileId": bpID},
@@ -335,8 +334,7 @@ func (r *Repo) CountSentBills(ctx context.Context, bpID string) (int64, error) {
 }
 
 // HasOverdueBills reports whether the profile has any SENT bill sent more than 3 days
-// ago (findAllByBillingProfileIdAndStatusAndSentAtBefore,
-// status SENT, cutoff = now − 3 days; size > 0).
+// ago (status SENT, cutoff = now − 3 days).
 func (r *Repo) HasOverdueBills(ctx context.Context, bpID string) (bool, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -3)
 	return r.bills.Exists(ctx, pgdoc.M{
@@ -402,7 +400,7 @@ func (r *Repo) Update(ctx context.Context, bp *BillingProfile) (*BillingProfile,
 
 // autoActivationFlow reads billingConfiguration.autoActivationFlow;
 // nil when the subdoc is absent
-// (→ isAutoActivationConfigured() == false).
+// (→ auto-activation is not configured).
 func (r *Repo) autoActivationFlow(ctx context.Context) (*AutoActivationFlow, error) {
 	var cfg struct {
 		AutoActivationFlow *AutoActivationFlow `json:"autoActivationFlow"`
@@ -414,7 +412,7 @@ func (r *Repo) autoActivationFlow(ctx context.Context) (*AutoActivationFlow, err
 	return cfg.AutoActivationFlow, nil
 }
 
-// ProvisioningPromotional mirrors BillingProvisioningPromotional ({amount, daysValidity}).
+// ProvisioningPromotional is a provisioning promotional-credit config entry ({amount, daysValidity}).
 type ProvisioningPromotional struct {
 	Amount       decimal.Decimal `json:"amount"`
 	DaysValidity int             `json:"daysValidity"`
@@ -479,7 +477,7 @@ func (r *Repo) BaseCurrency(ctx context.Context) (string, error) {
 
 // TimeUnitLimits reads billingConfiguration.settings.timeUnitLimits —
 // the per-time-unit "size in month" overrides the pricing
-// preview's toMonthlyPrice applies (PricingService.getTimeUnitSizeInMonth). Nil/empty when unset, in
+// preview's monthly-price conversion applies. Nil/empty when unset, in
 // which case the per-unit defaults (minute=43200, hour=720, month=1) apply.
 func (r *Repo) TimeUnitLimits(ctx context.Context) (map[string]int, error) {
 	var cfg struct {

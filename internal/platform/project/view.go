@@ -6,7 +6,7 @@ import (
 )
 
 // ResourceCount is a {type,count} entry on ProjectView. Populated from
-// the cloudResource aggregation; empty for now (no cloud resources yet).
+// the per-type cloud-resource counts; empty for now (no cloud resources yet).
 type ResourceCount struct {
 	Type  string `json:"type"`
 	Count int    `json:"count"`

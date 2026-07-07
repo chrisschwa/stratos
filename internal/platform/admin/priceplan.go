@@ -7,25 +7,22 @@ package admin
 // The plain reads that already live in handler.go are intentionally NOT re-registered here:
 //   - GET /price-plan            (list, h.listRaw)
 //   - GET /price-plan/{id}       (by-id 404, h.rawByID)
-//   - GET /price-plan/rule/{id}  (rule by-id 404, h.rawByID — this IS the getRule read)
+//   - GET /price-plan/rule/{id}  (rule by-id 404, h.rawByID — this IS the single-rule read)
 //
 // Follows the custommenu.go / promotioncode.go reference: id-aware* CRUD via the crud.go +
 // priceplan_repo.go helpers, exact perms / error strings / response envelopes, `_id`→`id`
 // shaping on the way out. (*PricePlan/PricePlanRule use a String id stored as a String `_id`
 // like savingsPlan, so the repo helpers match `_id` as a raw string — see priceplan_repo.go.)
 //
-// Perms: read = ADMIN_PRICE_PLAN_READ (admin:price_plan:read); mutate = ADMIN_PRICE_PLAN_MANAGE
-// (admin:price_plan:manage). create/update/delete write audit events
-// (auditAdmin) — deferred this pass (// TODO(audit)); the persisted state +
-// response are faithful.
+// Perms: read = admin:price_plan:read; mutate = admin:price_plan:manage. create/update/delete write
+// audit events — deferred this pass (// TODO(audit)); the persisted state + response are faithful.
 //
-// EXTERNAL INTEGRATION POINTS (returned as 501 after any faithful pre-step, do NOT touch the Handler struct):
-//   - GET /price-plan/resource-types and GET /price-plan/{id}/resource-types call
-//     BillingResourceService.getBillingResourceTypes → the external cloud/billing-resource catalog
-//     (ExternalService). Not wired into admin.Handler.
-//   - GET /price-plan/rule/{id}/usage sums applied money across OPEN bills (a decimal-money
-//     aggregation) — per the money rule we do NOT recompute money here; the rule-404 pre-step is
-//     faithful, the sum is not wired.
+// EXTERNAL/DEFERRED POINTS:
+//   - GET /price-plan/resource-types and GET /price-plan/{id}/resource-types return the local
+//     billing-resource catalog (the resource types + attribute schemas the cloud provider bills).
+//   - GET /price-plan/rule/{id}/usage would sum applied money across OPEN bills (a decimal-money
+//     total) — per the money rule we do NOT recompute money here; the rule-404 pre-step is
+//     faithful, the sum is not wired (returns 0).
 
 import (
 	"encoding/json"
@@ -50,7 +47,7 @@ const (
 	pricePlanRuleCollection = "pricePlanRule"
 )
 
-// routePricePlan registers the PricePlanAdminController endpoints NOT already in handler.go. chi
+// routePricePlan registers the price-plan admin endpoints NOT already in handler.go. chi
 // requires a single param name at a given path position, so every route under /price-plan/{...}
 // reuses `{id}` and every route under /price-plan/rule/{...} reuses `{id}` (handler.go already
 // registered /price-plan/{id} and /price-plan/rule/{id} with the name `id`). The path variables
@@ -62,11 +59,11 @@ func (h *Handler) routePricePlan(r chi.Router) {
 	r.Delete("/price-plan/{id}", h.pricePlanDelete)
 	r.Post("/price-plan/clone", h.pricePlanClone)
 
-	// PricePlan resource-types (external billing-resource catalog — not wired).
+	// PricePlan resource-types (local billing-resource catalog).
 	r.Get("/price-plan/resource-types", h.pricePlanResourceTypesAll)
 	r.Get("/price-plan/{id}/resource-types", h.pricePlanResourceTypes)
 
-	// PricePlanRule reads/mutations. (GET /price-plan/rule/{id} is the getRule read, already
+	// PricePlanRule reads/mutations. (GET /price-plan/rule/{id} is the single-rule read, already
 	// registered in handler.go.) `/price-plan/rule/clone` is a static sibling of `/rule/{id}`.
 	r.Get("/price-plan/{id}/rule", h.pricePlanListRules)
 	r.Post("/price-plan/rule", h.pricePlanRuleCreate)
@@ -89,13 +86,13 @@ type pricePlanReq struct {
 	ServiceProviders *json.RawMessage `json:"serviceProviders"`
 }
 
-// pricePlanNotFound is the exact 404 from PricePlanService.get
+// pricePlanNotFound is the exact 404 for a missing price plan
 // ("Could not find price plan with id %s", interpolated).
 func pricePlanNotFound(id string) *httpx.HTTPError {
 	return httpx.NotFound(fmt.Sprintf("Could not find price plan with id %s", id))
 }
 
-// pricePlanCreate handles create(): a null accessMode defaults to PUBLIC → save → single.
+// pricePlanCreate creates a price plan: a null accessMode defaults to PUBLIC, then save and return it.
 func (h *Handler) pricePlanCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pricePlanManagePerm) {
 		return
@@ -106,7 +103,7 @@ func (h *Handler) pricePlanCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	doc := req.doc()
-	// create: null accessMode → PUBLIC (PricePlanService.create).
+	// A null accessMode defaults to PUBLIC.
 	if req.AccessMode != nil && *req.AccessMode != "" {
 		doc["accessMode"] = *req.AccessMode
 	} else {
@@ -116,12 +113,12 @@ func (h *Handler) pricePlanCreate(w http.ResponseWriter, r *http.Request) {
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(result, CREATE, PLATFORM)
+	// TODO(audit): write an admin audit event when a price plan is created.
 	httpx.OK(w, shapeDoc(saved))
 }
 
-// pricePlanUpdate handles update(): getById-or-404 → set name/enabled/serviceProviders, overwrite
-// accessMode only when the request supplies it (if accessMode != null) → save → single.
+// pricePlanUpdate loads the plan (404 if absent), sets name/enabled/serviceProviders, overwrites
+// accessMode only when the request supplies it (non-null), then saves and returns it.
 func (h *Handler) pricePlanUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pricePlanManagePerm) {
 		return
@@ -155,20 +152,20 @@ func (h *Handler) pricePlanUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.ReplacePricePlanDoc(r.Context(), id, existing); httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE audit: field-level diff (middleware computes diffSnapshots(before, after)).
+	// Record an audit event with a field-level diff of the before/after documents.
 	after, _ := h.repo.PricePlanByID(r.Context(), id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// pricePlanDelete handles delete(): the use-in-external-services / use-in-projects guards (both 400),
-// then getById-or-404 → cascade-delete the plan's rules → delete the plan → success.
+// pricePlanDelete runs the use-in-external-services / use-in-projects guards (both 400), then loads
+// the plan (404 if absent), cascade-deletes the plan's rules, deletes the plan, and returns success.
 func (h *Handler) pricePlanDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pricePlanManagePerm) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	// guard 1: platformExternalService.existsByPricePlanId → 400 PRICE_PLAN_USE_IN_EXTERNAL_SERVICES.
+	// guard 1: reject with 400 when the plan is referenced by any external service.
 	usedInExt, err := h.repo.PricePlanUsedInExternalServices(r.Context(), id)
 	if httpx.WriteError(w, err) {
 		return
@@ -177,7 +174,7 @@ func (h *Handler) pricePlanDelete(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Price plan is in use in external services"))
 		return
 	}
-	// guard 2: projectService.existsByPricePlanId → 400 PRICE_PLAN_USE_IN_PROJECTS.
+	// guard 2: reject with 400 when the plan is referenced by any project.
 	usedInProj, err := h.repo.PricePlanUsedInProjects(r.Context(), id)
 	if httpx.WriteError(w, err) {
 		return
@@ -194,8 +191,8 @@ func (h *Handler) pricePlanDelete(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, pricePlanNotFound(id))
 		return
 	}
-	// TODO(audit): auditAdmin(pricePlan, DELETE, PLATFORM)
-	// cascade: getRulesByPricePlanId(id).forEach(delete) — then delete the plan.
+	// TODO(audit): write an admin audit event when a price plan is deleted.
+	// cascade: delete every rule for the plan, then delete the plan.
 	if err := h.repo.DeletePricePlanRulesByPlanID(r.Context(), id); httpx.WriteError(w, err) {
 		return
 	}
@@ -233,8 +230,8 @@ func billingResourceTypeCatalog() []billingResourceTypeDTO {
 	return out
 }
 
-// pricePlanResourceTypesAll handles getResourceTypes() — the global BillingResourceType catalog (the
-// resource types + attribute schemas the cloud provider bills). Backs the PricePlanRule form.
+// pricePlanResourceTypesAll returns the global billing-resource-type catalog (the resource types +
+// attribute schemas the cloud provider bills). Backs the price-plan-rule form.
 func (h *Handler) pricePlanResourceTypesAll(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pricePlanReadPerm) {
 		return
@@ -242,8 +239,8 @@ func (h *Handler) pricePlanResourceTypesAll(w http.ResponseWriter, r *http.Reque
 	httpx.List(w, billingResourceTypeCatalog())
 }
 
-// pricePlanResourceTypes handles getResourceTypes(pricePlanId) — same catalog (scoped by the
-// plan's external services; OpenStack's billing-resource set is the one catalog).
+// pricePlanResourceTypes returns the same catalog for a specific plan (scoped by the plan's external
+// services; OpenStack's billing-resource set is the one catalog).
 func (h *Handler) pricePlanResourceTypes(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pricePlanReadPerm) {
 		return
@@ -262,8 +259,8 @@ func (req pricePlanReq) doc() pgdoc.M {
 	return d
 }
 
-// pricePlanClone handles clonePricePlans(): for each item, get the source-or-404, create a disabled
-// copy (name = newName or "<src> (Copy)", same accessMode + serviceProviders), and — when
+// pricePlanClone clones price plans: for each item, load the source (404 if absent), create a
+// disabled copy (name = newName or "<src> (Copy)", same accessMode + serviceProviders), and — when
 // includeRules — clone all the source's rules into the new plan. Returns the per-item results.
 func (h *Handler) pricePlanClone(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pricePlanManagePerm) {
@@ -294,7 +291,7 @@ func (h *Handler) pricePlanClone(w http.ResponseWriter, r *http.Request) {
 		if v, ok := src["accessMode"]; ok {
 			newDoc["accessMode"] = v
 		} else {
-			newDoc["accessMode"] = "PUBLIC" // create() defaults a null accessMode to PUBLIC.
+			newDoc["accessMode"] = "PUBLIC" // a null accessMode defaults to PUBLIC on create.
 		}
 		if v, ok := src["serviceProviders"]; ok {
 			newDoc["serviceProviders"] = v
@@ -303,7 +300,7 @@ func (h *Handler) pricePlanClone(w http.ResponseWriter, r *http.Request) {
 		if httpx.WriteError(w, err) {
 			return
 		}
-		// TODO(audit): auditAdmin(newPlan, CREATE, PLATFORM)
+		// TODO(audit): write an admin audit event when the cloned plan is created.
 		newID, _ := pricePlanDocID(saved)
 		rulesCloned := 0
 		if item.includeRules() {
@@ -369,7 +366,7 @@ func validatePricePlanRule(req pricePlanRuleReq) *httpx.HTTPError {
 	return nil
 }
 
-// validateTiers checks every price's tiers for to >= from (else PRICE_TIER). Tier
+// validateTiers checks every price's tiers for to >= from (else a 400 tier-ordering error). Tier
 // from/to are compared numerically; non-numeric / absent bounds are skipped (compared only when
 // both are non-null).
 func validateTiers(pricesJSON json.RawMessage) *httpx.HTTPError {
@@ -398,7 +395,7 @@ func validateTiers(pricesJSON json.RawMessage) *httpx.HTTPError {
 	return nil
 }
 
-// pricePlanRuleCreate handles createRule(): validate → save → single. ADMIN_PRICE_PLAN_MANAGE.
+// pricePlanRuleCreate validates the rule, saves it, and returns it. Requires manage permission.
 func (h *Handler) pricePlanRuleCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pricePlanManagePerm) {
 		return
@@ -416,12 +413,12 @@ func (h *Handler) pricePlanRuleCreate(w http.ResponseWriter, r *http.Request) {
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(result, CREATE, PLATFORM)
+	// TODO(audit): write an admin audit event when a rule is created.
 	httpx.OK(w, shapeDoc(saved))
 }
 
-// pricePlanListRules handles listRules(id): getRulesByPricePlanId → list envelope. The checkAttributes
-// default (a null applyMethod → ADD_TO_TOTAL, persisted) is applied on read.
+// pricePlanListRules lists the rules for a plan → list envelope. The default for a null applyMethod
+// (ADD_TO_TOTAL, persisted) is applied on read.
 func (h *Handler) pricePlanListRules(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pricePlanReadPerm) {
 		return
@@ -437,8 +434,8 @@ func (h *Handler) pricePlanListRules(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, rules)
 }
 
-// pricePlanRuleUpdate handles updateRule(): validate → getById-or-404 → set name/prices/filters/
-// modifiers/resourceType/applyMethod/timeUnit → save → single.
+// pricePlanRuleUpdate validates, loads the rule (404 if absent), sets name/prices/filters/
+// modifiers/resourceType/applyMethod/timeUnit, then saves and returns it.
 func (h *Handler) pricePlanRuleUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pricePlanManagePerm) {
 		return
@@ -462,7 +459,7 @@ func (h *Handler) pricePlanRuleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := maps.Clone(existing)
-	// Setters: name, prices, filters, modifiers, resourceType, applyMethod, timeUnit (NOT
+	// Overwrite: name, prices, filters, modifiers, resourceType, applyMethod, timeUnit (NOT
 	// pricePlanId). Drop the overwritten optional keys first (an omitted field → absent).
 	for _, k := range []string{"name", "prices", "filters", "modifiers", "resourceType", "applyMethod", "timeUnit"} {
 		delete(existing, k)
@@ -475,13 +472,13 @@ func (h *Handler) pricePlanRuleUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.ReplacePricePlanRuleDoc(r.Context(), id, existing); httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE audit: field-level diff (middleware computes diffSnapshots(before, after)).
+	// Record an audit event with a field-level diff of the before/after documents.
 	after, _ := h.repo.PricePlanRuleByID(r.Context(), id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// pricePlanRuleDelete handles deleteRule(): getById-or-404 → delete → success("Successful operation").
+// pricePlanRuleDelete loads the rule (404 if absent), deletes it, and returns success ("Successful operation").
 func (h *Handler) pricePlanRuleDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pricePlanManagePerm) {
 		return
@@ -498,14 +495,14 @@ func (h *Handler) pricePlanRuleDelete(w http.ResponseWriter, r *http.Request) {
 	if _, err := h.repo.DeletePricePlanRuleDoc(r.Context(), id); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(existing, DELETE, PLATFORM)
+	// TODO(audit): write an admin audit event when a rule is deleted.
 	httpx.OK(w, "Successful operation")
 }
 
-// pricePlanRuleUsage handles getRuleUsage(): getById-or-404, then PricePlanRuleUsage {ruleId, ruleName,
-// openBillsCount, totalAppliedAmount}. openBillsCount counts OPEN bills whose items applied this rule
-// (a plain count, allowed); the Σ-applied money sum stays deferred (money rule) → 0 here.
-// Greenfield (no bills) → {…, openBillsCount:0, totalAppliedAmount:0}, which un-blocks the rule page.
+// pricePlanRuleUsage loads the rule (404 if absent), then returns {ruleId, ruleName,
+// openBillsCount, totalAppliedAmount}. The Σ-applied money sum stays deferred (money rule) → 0 here,
+// and with no bills the count is 0 too — {…, openBillsCount:0, totalAppliedAmount:0}, which
+// un-blocks the rule page.
 func (h *Handler) pricePlanRuleUsage(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pricePlanReadPerm) {
 		return
@@ -525,9 +522,9 @@ func (h *Handler) pricePlanRuleUsage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// pricePlanRuleClone handles cloneRules(): resolves the target price plan first (get → 404 when
-// absent), then clones each requested rule into it. Per-item name-conflict handling:
-// overwrite → delete the existing same-name rule first; else append " (Copy)".
+// pricePlanRuleClone resolves the target price plan first (404 when absent), then clones each
+// requested rule into it. Per-item name-conflict handling: overwrite → delete the existing same-name
+// rule first; else append " (Copy)".
 func (h *Handler) pricePlanRuleClone(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pricePlanManagePerm) {
 		return
@@ -537,7 +534,7 @@ func (h *Handler) pricePlanRuleClone(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
 		return
 	}
-	// pricePlanService.get(targetPricePlanId) is called FIRST (→ 404 when absent).
+	// Resolve the target price plan FIRST (→ 404 when absent).
 	target, err := h.repo.PricePlanByID(r.Context(), req.TargetPricePlanID)
 	if httpx.WriteError(w, err) {
 		return
@@ -596,7 +593,7 @@ func (h *Handler) doCloneRule(r *http.Request, src pgdoc.M, targetPlanID, newNam
 	if existing != nil {
 		if overwrite {
 			exID, _ := pricePlanDocID(existing)
-			// TODO(audit): auditAdmin(existing, DELETE, PLATFORM)
+			// TODO(audit): write an admin audit event when the overwritten rule is deleted.
 			if _, derr := h.repo.DeletePricePlanRuleDoc(r.Context(), exID); derr != nil {
 				return "", false, "", httpx.NewError(http.StatusInternalServerError, http.StatusInternalServerError, derr.Error())
 			}
@@ -618,13 +615,13 @@ func (h *Handler) doCloneRule(r *http.Request, src pgdoc.M, targetPlanID, newNam
 	if serr != nil {
 		return "", false, "", httpx.NewError(http.StatusInternalServerError, http.StatusInternalServerError, serr.Error())
 	}
-	// TODO(audit): auditAdmin(savedRule, CREATE, PLATFORM)
+	// TODO(audit): write an admin audit event when the cloned rule is created.
 	newID, _ := pricePlanDocID(saved)
 	return newID, overwritten, finalName, nil
 }
 
-// applyRuleDefault applies the checkAttributes default: a rule with no applyMethod gets
-// ADD_TO_TOTAL, persisted (the default is saved back) and reflected in the read.
+// applyRuleDefault applies the default for a rule with no applyMethod: it gets ADD_TO_TOTAL,
+// persisted (the default is saved back) and reflected in the read.
 func (h *Handler) applyRuleDefault(r *http.Request, rule pgdoc.M) {
 	if _, ok := rule["applyMethod"]; ok && rule["applyMethod"] != nil {
 		return
@@ -690,7 +687,7 @@ type clonePricePlanItem struct {
 	IncludeRules *bool  `json:"includeRules"`
 }
 
-// includeRules applies the defaultValue=true: an absent includeRules defaults to true.
+// includeRules defaults to true: an absent includeRules is treated as true.
 func (i clonePricePlanItem) includeRules() bool {
 	return i.IncludeRules == nil || *i.IncludeRules
 }

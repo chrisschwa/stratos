@@ -21,14 +21,14 @@ import (
 // by-savings-plan-with-billing-profile). The two plain reads (bare list + GET /{id}) are already
 // registered in handler.go (listRaw / rawByID) and are intentionally NOT re-registered here.
 //
-// Perms (AdminPermissionEnum → admin:* key): read endpoints gate ADMIN_SAVINGS_PLAN_READ
+// Perms (admin:* permission keys): read endpoints gate ADMIN_SAVINGS_PLAN_READ
 // (admin:savings_plan:read); the mutations gate ADMIN_SAVINGS_PLAN_MANAGE (admin:savings_plan:manage).
 //
-// update/delete also write audit events (auditService.auditAdmin) — deferred
-// this pass (// TODO(audit)); the persisted state + the response envelope are faithful.
+// update/delete should also write admin audit events — deferred this pass (// TODO(audit)); the
+// persisted state + the response envelope are faithful.
 //
 // Storage uses the id-aware crud.go helpers + shapeDoc (the endpoints return the RAW
-// SavingsContract domain via CustomHttpResponse.single, exactly like the by-id read), with the
+// SavingsContract domain as a single-object envelope, exactly like the by-id read), with the
 // money/tier business logic (create's discount-rate selection) decoded through the typed billing
 // domain (decimal.Decimal) so the decimal compares are faithful.
 
@@ -60,9 +60,9 @@ type createSavingsContractReq struct {
 	StartDate              string           `json:"startDate"`
 }
 
-// savingsContractCreate handles createSavingsContract: validate billing profile + available plan +
-// no-duplicate-active, compute start/end dates + discount rate from the matching schedule's tiers,
-// persist a new ACTIVE contract → single(contract). Gated ADMIN_SAVINGS_PLAN_MANAGE.
+// savingsContractCreate validates the billing profile + available plan + no-duplicate-active,
+// computes start/end dates + the discount rate from the matching schedule's tiers, persists a new
+// ACTIVE contract, and returns it. Gated ADMIN_SAVINGS_PLAN_MANAGE.
 func (h *Handler) savingsContractCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, savingsContractManagePerm) {
 		return
@@ -74,7 +74,7 @@ func (h *Handler) savingsContractCreate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// billingProfileService.getBillingProfileById(billingProfileId) — 404 if absent.
+	// Load the billing profile; 404 if it doesn't exist.
 	bp, err := h.repo.savingsContractFindBillingProfile(r.Context(), billingProfileID)
 	if httpx.WriteError(w, err) {
 		return
@@ -84,7 +84,7 @@ func (h *Handler) savingsContractCreate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// savingsPlanService.getAvailableSavingsPlan(savingsPlanId) = findByIdAndAvailable(id,true).
+	// Load the savings plan, only when it's marked available.
 	plan, err := h.repo.savingsContractAvailablePlan(r.Context(), req.SavingsPlanID)
 	if httpx.WriteError(w, err) {
 		return
@@ -94,7 +94,7 @@ func (h *Handler) savingsContractCreate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// existsBySavingsPlanIdAndBillingProfileIdAndStatus(planId, bpId, ACTIVE) → 400.
+	// Reject a second ACTIVE contract for the same (plan, billing profile) → 400.
 	exists, err := h.repo.savingsContractActiveExists(r.Context(), plan.ID, billingProfileID)
 	if httpx.WriteError(w, err) {
 		return
@@ -134,8 +134,7 @@ func (h *Handler) savingsContractCreate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Build the stored doc (omit blank optional strings; targets passes through
-	// the plan's targets — copies savingsPlan.getTargets()).
+	// Build the stored doc (omit blank optional strings; targets is copied from the plan's targets).
 	doc := pgdoc.M{
 		"billingProfileId": billingProfileID,
 		"savingsPlanId":    plan.ID,
@@ -163,11 +162,11 @@ func (h *Handler) savingsContractCreate(w http.ResponseWriter, r *http.Request) 
 	httpx.OK(w, shapeDoc(saved))
 }
 
-// savingsContractUpdate handles updateSavingsContract: findById-or-404 → overwrite the mutable fields
-// from the request body → save → single. Gated ADMIN_SAVINGS_PLAN_MANAGE.
+// savingsContractUpdate loads the contract (404 if absent), overwrites the mutable fields from the
+// request body, persists, and returns the updated record. Gated ADMIN_SAVINGS_PLAN_MANAGE.
 // Overwrites: billingProfileId, savingsPlanId, savingsPlanName, targets, startDate, endDate,
 // discountRate, monthlyCommittedAmount, paidUpfront, orderId, status (durationMonths/createdAt are
-// NOT overwritten by update). A null field in the body becomes null on the entity → dropped here.
+// NOT overwritten by update). A null field in the body is dropped from the stored doc.
 func (h *Handler) savingsContractUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, savingsContractManagePerm) {
 		return
@@ -187,10 +186,9 @@ func (h *Handler) savingsContractUpdate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	before := maps.Clone(existing) // snapshot the pre-mutation state for the audit field-diff
-	// Overwrite the mutable fields (drop-first so an omitted/null body field becomes null,
-	// matching existing.setX(body.getX()) with body.getX()==null). durationMonths/createdAt
-	// are NOT overwritten by update; paidUpfront is a primitive bool → always set from the
-	// body (defaults false when omitted).
+	// Overwrite the mutable fields (drop-first so an omitted/null body field ends up absent).
+	// durationMonths/createdAt are NOT overwritten by update; paidUpfront is a plain bool → always
+	// set from the body (defaults false when omitted).
 	for _, k := range []string{
 		"billingProfileId", "savingsPlanId", "savingsPlanName", "targets", "startDate",
 		"endDate", "discountRate", "monthlyCommittedAmount", "orderId", "status", "paidUpfront",
@@ -204,18 +202,17 @@ func (h *Handler) savingsContractUpdate(w http.ResponseWriter, r *http.Request) 
 	if err := h.repo.ReplaceDoc(r.Context(), savingsContractCollection, id, existing); httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE audit: field-level before/after diff onto the audit event (the middleware
-	// computes diffSnapshots(before, after) → AuditEvent.changes). Re-read the AFTER from the datastore so
-	// both snapshots are store-decoded (same store types/shape) — avoids spurious diffs from comparing
-	// the Go-rebuilt map against the datastore-decoded `before`.
+	// UPDATE audit: the audit middleware records the field-level before/after diff on the audit
+	// event. Re-read the AFTER from the datastore so both snapshots are store-decoded (same store
+	// types/shape) — avoids spurious diffs from comparing the Go-rebuilt map against the
+	// datastore-decoded `before`.
 	after, _ := h.repo.FindDoc(r.Context(), savingsContractCollection, id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// savingsContractDelete handles deleteSavingsContract: getById-or-404 → deleteById. Returns
-// `void` → HTTP 200 with an EMPTY body (not the envelope,
-// not 202). Gated ADMIN_SAVINGS_PLAN_MANAGE.
+// savingsContractDelete loads the contract (404 if absent) and deletes it. Responds with HTTP 200
+// and an EMPTY body (not the envelope, not 202). Gated ADMIN_SAVINGS_PLAN_MANAGE.
 func (h *Handler) savingsContractDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, savingsContractManagePerm) {
 		return
@@ -232,14 +229,13 @@ func (h *Handler) savingsContractDelete(w http.ResponseWriter, r *http.Request) 
 	if _, err := h.repo.DeleteDoc(r.Context(), savingsContractCollection, id); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditService.auditAdmin(contract, DELETE, ORGANIZATION)
-	// The handler is `void` → HTTP 200, empty body.
+	// TODO(audit): write an organization-scoped admin audit event when a contract is deleted.
+	// The handler returns no body → HTTP 200, empty body.
 	w.WriteHeader(http.StatusOK)
 }
 
-// savingsContractsByBillingProfile handles getSavingsContractsByBillingProfileId: the raw
-// SavingsContract list for a billing profile (findByBillingProfileId) → list envelope.
-// Gated ADMIN_SAVINGS_PLAN_READ.
+// savingsContractsByBillingProfile returns the raw SavingsContract list for a billing profile as a
+// list envelope. Gated ADMIN_SAVINGS_PLAN_READ.
 func (h *Handler) savingsContractsByBillingProfile(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, savingsContractPerm) {
 		return
@@ -254,9 +250,8 @@ func (h *Handler) savingsContractsByBillingProfile(w http.ResponseWriter, r *htt
 	httpx.List(w, items)
 }
 
-// savingsContractsBySavingsPlan handles getSavingsContractsBySavingsPlanId: the contracts for a
-// savings plan, each enriched with its billingProfile (the $lookup aggregation), createdAt DESC →
-// list envelope (List<SavingsContractDto>). Gated ADMIN_SAVINGS_PLAN_READ.
+// savingsContractsBySavingsPlan returns the contracts for a savings plan, each joined to its
+// billing profile, newest first, as a list envelope. Gated ADMIN_SAVINGS_PLAN_READ.
 func (h *Handler) savingsContractsBySavingsPlan(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, savingsContractPerm) {
 		return
@@ -274,9 +269,8 @@ func (h *Handler) savingsContractsBySavingsPlan(w http.ResponseWriter, r *http.R
 // --- pure helpers (unit-tested) ---
 
 // savingsContractStartDate computes the start date: CURRENT_MONTH → first day of the
-// current month, NEXT_MONTH → first day of next month (both midnight UTC, per BillingUtils). Any
-// other value is a bad enum (the switch is exhaustive over the two enum constants — a malformed
-// body would 400 at binding; we mirror that with a 400).
+// current month, NEXT_MONTH → first day of next month (both midnight UTC). Any other value is a bad
+// enum and is rejected with a 400.
 func savingsContractStartDate(start string) (time.Time, *httpx.HTTPError) {
 	now := time.Now().UTC()
 	switch start {
@@ -290,7 +284,7 @@ func savingsContractStartDate(start string) (time.Time, *httpx.HTTPError) {
 	}
 }
 
-// savingsContractDiscountRate computes getDiscountRate: from the schedule's upfront/no-upfront tiers,
+// savingsContractDiscountRate picks the discount rate: from the schedule's upfront/no-upfront tiers,
 // take the max discount among tiers whose startAmount <= monthlyCommittedAmount → 400 if none.
 func savingsContractDiscountRate(paidUpfront bool, schedule *billing.SavingsPlanSchedule, monthly decimal.Decimal) (decimal.Decimal, *httpx.HTTPError) {
 	tiers := schedule.NoUpfrontTiers
@@ -322,8 +316,7 @@ func savingsContractDiscountRate(paidUpfront bool, schedule *billing.SavingsPlan
 
 // savingsContractBody holds the mutable fields of the SavingsContract request body on PUT update.
 // Money fields are *decimal.Decimal (stored as a decimal string in jsonb). A nil pointer /
-// blank string → the field is omitted from the $set map (and dropped on the entity), matching
-// setX(null).
+// blank string → the field is omitted from the update map, so it's dropped from the stored doc.
 type savingsContractBody struct {
 	BillingProfileID       string            `json:"billingProfileId"`
 	SavingsPlanID          string            `json:"savingsPlanId"`
@@ -344,8 +337,8 @@ type SavingsPlanTargetBody struct {
 	Filters      []map[string]interface{} `json:"filters"`
 }
 
-// setMap builds the $set-equivalent JSON for the overwritten update fields. Blank strings and nil
-// pointers are omitted (a null/omitted body field is dropped on the entity).
+// setMap builds the map of overwritten update fields. Blank strings and nil pointers are omitted
+// (a null/omitted body field is dropped from the stored doc).
 func (b savingsContractBody) setMap() pgdoc.M {
 	d := pgdoc.M{}
 	if b.BillingProfileID != "" {

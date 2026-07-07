@@ -7,8 +7,8 @@ package admin
 // perms / error strings / response envelopes, `_id`→`id` shaping on the way out.
 //
 // All endpoints gate on ADMIN_PROMOTIONAL_CREDIT_MANAGE (admin:promotional_credit:manage). The
-// create/update/delete write audit events (AuditService.auditAdmin) — that
-// is deferred this pass (// TODO(audit)); the persisted state + response are faithful.
+// create/update/delete should also write admin audit events — that is deferred this pass
+// (// TODO(audit)); the persisted state + response are faithful.
 
 import (
 	"encoding/json"
@@ -85,7 +85,7 @@ func validatePromotionCode(code string, amountSet, amountPositive bool) *httpx.H
 	return nil
 }
 
-// decimalIsPositive reports whether a decimal.Decimal is strictly > 0 (amount.compareTo(ZERO) > 0).
+// decimalIsPositive reports whether a decimal.Decimal is strictly greater than zero.
 func decimalIsPositive(d decimal.Decimal) bool {
 	s := d.String()
 	if s == "" || s == "NaN" {
@@ -105,8 +105,9 @@ func decimalIsPositive(d decimal.Decimal) bool {
 	return false
 }
 
-// promotionCodeCreate handles create(): validate → normalize (trim code, default status ACTIVE) →
-// existsByCodeIgnoreCase → save → single. ADMIN_PROMOTIONAL_CREDIT_MANAGE.
+// promotionCodeCreate validates the request, normalizes it (trim code, default status ACTIVE),
+// rejects a case-insensitively duplicate code, persists the doc, and returns the saved record.
+// Gated ADMIN_PROMOTIONAL_CREDIT_MANAGE.
 func (h *Handler) promotionCodeCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, promotionCodePerm) {
 		return
@@ -121,12 +122,12 @@ func (h *Handler) promotionCodeCreate(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Amount must be greater than 0"))
 		return
 	}
-	// validate() runs BEFORE normalize(); code is checked blank, then amount.
+	// Validation runs before normalization: code is checked blank, then amount.
 	if verr := validatePromotionCode(req.Code, amountSet, decimalIsPositive(amount)); verr != nil {
 		httpx.WriteError(w, verr)
 		return
 	}
-	// normalize: trim code, default status ACTIVE when null.
+	// Normalize: trim code, default status ACTIVE when null.
 	code := strings.TrimSpace(req.Code)
 	exists, err := h.repo.PromotionCodeExistsByCode(r.Context(), code)
 	if httpx.WriteError(w, err) {
@@ -137,7 +138,7 @@ func (h *Handler) promotionCodeCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	doc := req.doc(code, amount, amountSet)
-	// normalize(): a null status defaults to ACTIVE on create.
+	// A null status defaults to ACTIVE on create.
 	if req.Status != nil {
 		doc["status"] = *req.Status
 	} else {
@@ -147,12 +148,13 @@ func (h *Handler) promotionCodeCreate(w http.ResponseWriter, r *http.Request) {
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(result, CREATE, PLATFORM)
+	// TODO(audit): write a platform-level admin audit event when a promotion code is created.
 	httpx.OK(w, shapeDoc(saved))
 }
 
-// promotionCodeUpdate handles update(): getById-or-404 → blank-code 400 → code-change dup 400 → set the
-// updatable fields (status only when non-null) → validate(existing) → save → single.
+// promotionCodeUpdate loads the code (404 if absent), rejects a blank code (400), rejects a
+// changed code that collides with an existing one (400), overwrites the updatable fields (status
+// only when non-null), re-validates, persists, and returns the updated record.
 func (h *Handler) promotionCodeUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, promotionCodePerm) {
 		return
@@ -172,7 +174,7 @@ func (h *Handler) promotionCodeUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := maps.Clone(existing)
-	// StringUtils.isBlank(update.getCode()) → "Code is required" (checked before the dup check).
+	// A blank code → "Code is required" (checked before the dup check).
 	if strings.TrimSpace(req.Code) == "" {
 		httpx.WriteError(w, httpx.BadRequest("Code is required"))
 		return
@@ -194,7 +196,7 @@ func (h *Handler) promotionCodeUpdate(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Amount must be greater than 0"))
 		return
 	}
-	// Apply the update onto the existing doc (setters): code(trimmed), description, amount,
+	// Apply the update onto the existing doc: code(trimmed), description, amount,
 	// creditValidityDuration, validFrom, validUntil, targetOrganizationIds, and status only when
 	// the request status is non-null. Drop the old optional keys first so an omitted/null field
 	// becomes absent (nulls omitted).
@@ -204,11 +206,11 @@ func (h *Handler) promotionCodeUpdate(w http.ResponseWriter, r *http.Request) {
 	for k, v := range req.doc(strings.TrimSpace(req.Code), amount, amountSet) {
 		existing[k] = v
 	}
-	// status: only overwritten when the request supplies it (if update.getStatus() != null).
+	// status: only overwritten when the request supplies a non-null value.
 	if req.Status != nil {
 		existing["status"] = *req.Status
 	}
-	// validate(existing) — code is non-blank here; amount must still be > 0.
+	// Re-validate the merged doc — code is non-blank here; amount must still be > 0.
 	if verr := validatePromotionCode(strings.TrimSpace(req.Code), amountSet, decimalIsPositive(amount)); verr != nil {
 		httpx.WriteError(w, verr)
 		return
@@ -216,14 +218,14 @@ func (h *Handler) promotionCodeUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.ReplaceDoc(r.Context(), promotionCodeCollection, id, existing); httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE audit: field-level diff (middleware computes diffSnapshots(before, after)).
+	// UPDATE audit: the audit middleware computes the field-level before/after diff.
 	after, _ := h.repo.FindDoc(r.Context(), promotionCodeCollection, id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// promotionCodeDelete handles delete(): getById-or-404 → delete → success("Successful operation").
-// Returns CustomHttpResponse.success() (NOT the deleted entity, despite the service returning it).
+// promotionCodeDelete loads the code (404 if absent), deletes it, and returns a "Successful
+// operation" success envelope (not the deleted entity).
 func (h *Handler) promotionCodeDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, promotionCodePerm) {
 		return
@@ -240,17 +242,16 @@ func (h *Handler) promotionCodeDelete(w http.ResponseWriter, r *http.Request) {
 	if _, err := h.repo.DeleteDoc(r.Context(), promotionCodeCollection, id); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(existing, DELETE, PLATFORM)
+	// TODO(audit): write a platform-level admin audit event when a promotion code is deleted.
 	httpx.OK(w, "Successful operation")
 }
 
-// promotionCodePush handles push(): PromotionCodeRedemptionService.pushToOrganizations — for each
-// organization it mints a PromotionalCredit (FX + expiration), records a redemption, and audits. That
-// cascades through OrganizationService / BillingProfileService / PromotionalCreditService /
-// ExchangeRateService — none of which is wired into admin.Handler. Per the not-wired rule we do NOT touch
-// the Handler struct; the purely-external mint is returned as a 501. The one verifiable
-// pre-step (getById → 404 "Promotion code not found" when the code is missing) and the empty-input
-// guard ("At least one organization is required") ARE faithful.
+// promotionCodePush would push a promotion code to a set of organizations: for each organization it
+// mints a PromotionalCredit (FX + expiration), records a redemption, and audits. That mint spans the
+// organization, billing-profile, promotional-credit, and exchange-rate subsystems, none of which is
+// wired into admin.Handler, so the mint itself returns a 501 without touching the Handler struct. The
+// two verifiable pre-steps ARE faithful: a missing code → 404 "Promotion code not found", and an
+// empty organization list → "At least one organization is required".
 func (h *Handler) promotionCodePush(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, promotionCodePerm) {
 		return
@@ -261,7 +262,7 @@ func (h *Handler) promotionCodePush(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
 		return
 	}
-	// pushToOrganizations resolves the promotion code first (getById → 404 when absent).
+	// Resolve the promotion code first (404 when absent).
 	existing, err := h.repo.FindDoc(r.Context(), promotionCodeCollection, id)
 	if httpx.WriteError(w, err) {
 		return
@@ -276,7 +277,7 @@ func (h *Handler) promotionCodePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The actual mint (PromotionalCredit per org + redemption record + FX + audit) needs the
-	// org/billing-profile/promotional-credit/exchange-rate services — not available to admin.Handler.
+	// org, billing-profile, promotional-credit, and exchange-rate subsystems — not available to admin.Handler.
 	httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
 		fmt.Sprintf("pushToOrganizations not implemented: %s", id)))
 }

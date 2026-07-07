@@ -16,9 +16,9 @@ import (
 // decimal money (tier startAmount, modifier value) that must round-trip through the registered
 // decimal codec, so these read/write the typed value. `_id` is a plain String id.
 //
-// The admin endpoints return the RAW document via CustomHttpResponse.single/.list. Decimal money
-// serializes as a JSON NUMBER; shopspring decimal would quote it, so the response goes through the DTO
-// (json.Number money), mirroring how savingsplan.go reuses billing.SavingsPlanToDto.
+// The admin endpoints return the RAW document. Decimal money serializes as a JSON NUMBER; shopspring
+// decimal would quote it, so the response goes through the DTO (json.Number money), mirroring how
+// savingsplan.go reuses billing.SavingsPlanToDto.
 
 // --- stored domain (money = decimal.Decimal, stored as a decimal string in jsonb) ---
 
@@ -132,7 +132,7 @@ func (r *Repo) InsertPriceAdjustmentRule(ctx context.Context, collection string,
 	return &rule, nil
 }
 
-// PriceAdjustmentRuleByID loads a rule by id (findById): the typed rule, or (nil,nil) when absent.
+// PriceAdjustmentRuleByID loads a rule by id: the typed rule, or (nil,nil) when absent.
 func (r *Repo) PriceAdjustmentRuleByID(ctx context.Context, collection, id string) (*priceAdjustmentRule, error) {
 	var rule priceAdjustmentRule
 	found, err := r.c(collection).Get(ctx, id, &rule)
@@ -197,8 +197,8 @@ func (r *Repo) PriceAdjustmentRuleUsage(ctx context.Context, ruleID string) (int
 	return len(bills), total, nil
 }
 
-// PriceAdjustmentRulesByPricePlanID loads rules by price plan (findByPricePlanId, ALL — not only enabled) → DTOs (never
-// nil). getRulesByPricePlanId returns the raw documents; money → json.Number via the DTO.
+// PriceAdjustmentRulesByPricePlanID loads rules by price plan (ALL — not only enabled) → DTOs (never
+// nil). Returns the raw documents; money → json.Number via the DTO.
 func (r *Repo) PriceAdjustmentRulesByPricePlanID(ctx context.Context, collection, pricePlanID string) ([]priceAdjustmentRuleDto, error) {
 	var rules []priceAdjustmentRule
 	if err := r.c(collection).Find(ctx, pgdoc.M{"pricePlanId": pricePlanID}, &rules); err != nil {

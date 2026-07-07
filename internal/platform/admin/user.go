@@ -25,23 +25,23 @@ import (
 // OAuth2 token MINT) stays unimplemented, because this service is a pure OIDC resource server
 // (Keycloak owns token issuance).
 //
-// Call graph:
+// Routes:
 //
-//	POST   /user                 create(AddUserRequest)   ADMIN_USER_CREATE        (datastore upsert-by-email + best-effort project invites)
-//	GET    /user/{id}            getUser=getById          ADMIN_USER_READ          (datastore findById-or-404)
-//	GET    /user                 listUsers                ADMIN_USER_READ          (ALREADY in handler.go — h.listRaw "users"; NOT re-registered)
-//	GET    /user/sub/{sub}       getUserBySub             ADMIN_USER_READ          (datastore findBySub; null → {})
-//	GET    /user/project/{pid}   getUserByProject         ADMIN_USER_READ          (project findById-or-404 → owner sub → user; null → {})
-//	GET    /user/{id}/services   getUserExternalServices  ADMIN_USER_READ          (getById-or-404 → listByUser → DTO; empty greenfield → [])
-//	PUT    /user/{id}            update(User)             ADMIN_USER_UPDATE        (datastore: sub/firstName/lastName/email overwrite)
-//	DELETE /user/{id}            delete                   ADMIN_USER_DELETE        (onCleanUpUser keystone-user cleanup → deleteById)
-//	POST   /user/{id}/impersonate impersonate            ADMIN_USER_IMPERSONATE   [not implemented: local OAuth2 token mint — divergent by design]
+//	POST   /user                  userCreate            ADMIN_USER_CREATE       (datastore upsert-by-email + best-effort project invites)
+//	GET    /user/{id}             userGet               ADMIN_USER_READ         (datastore load-by-id-or-404)
+//	GET    /user                  (list)                ADMIN_USER_READ         (ALREADY in handler.go — h.listRaw "users"; NOT re-registered)
+//	GET    /user/sub/{sub}        userBySub             ADMIN_USER_READ         (datastore load-by-sub; null → {})
+//	GET    /user/project/{pid}    userByProject         ADMIN_USER_READ         (project load-by-id-or-404 → owner sub → user; null → {})
+//	GET    /user/{id}/services    userExternalServices  ADMIN_USER_READ         (load-by-id-or-404 → list the user's external services → DTO; empty greenfield → [])
+//	PUT    /user/{id}             userUpdate            ADMIN_USER_UPDATE       (datastore: sub/firstName/lastName/email overwrite)
+//	DELETE /user/{id}             userDelete            ADMIN_USER_DELETE       (per-user keystone cleanup → delete by id)
+//	POST   /user/{id}/impersonate userImpersonate       ADMIN_USER_IMPERSONATE  [not implemented: local OAuth2 token mint — divergent by design]
 //
-// Faithfulness: exact perms / error strings (USER_ID_NOT_FOUND = "User with id %s not found ",
-// PROJECT_ID_WAS_NOT_FOUND = "The project with id %s was not found. ", USER_IS_IN_USE_FOR_PROJECTS =
-// "User is in use for projects", CANNOT_DELETE_USER = "Cannot delete user " — all verbatim incl.
-// trailing spaces). Datastore writes via the crud.go helpers + user_repo.go. Identity/Keycloak/token
-// ops return 501. The service also writes audit events (deferred, // TODO(audit)).
+// Error strings are exact: "User with id %s not found ",
+// "The project with id %s was not found. ",
+// "User is in use for projects", "Cannot delete user " — all verbatim incl.
+// trailing spaces. Datastore writes via the crud.go helpers + user_repo.go. Identity/Keycloak/token
+// ops return 501. The surface also writes audit events (deferred, // TODO(audit)).
 
 const userCollection = "users"
 
@@ -53,7 +53,7 @@ const (
 	userImpersonatePerm = "admin:user:impersonate"
 )
 
-// routeUser registers the UserAdminController endpoints not already in handler.go. The {id} param
+// routeUser registers the admin user-management endpoints not already in handler.go. The {id} param
 // name reuses the one chi already uses elsewhere at this path position. GET /user (the list) is
 // already registered as h.listRaw("admin:user:read","users") and is intentionally NOT re-registered.
 func (h *Handler) routeUser(r chi.Router) {
@@ -67,14 +67,14 @@ func (h *Handler) routeUser(r chi.Router) {
 	r.Post("/user/{id}/impersonate", h.userImpersonate)
 }
 
-// userNotFound is the exact 404 (translation userIdNotFound, "User with id %s not found " —
-// trailing space, interpolated). Used by getById-backed endpoints.
+// userNotFound is the exact 404 ("User with id %s not found " —
+// trailing space, interpolated). Used by the load-by-id endpoints.
 func userNotFound(id string) *httpx.HTTPError {
 	return httpx.NotFound(fmt.Sprintf("User with id %s not found ", id))
 }
 
-// userUpdateReq holds the mutable fields the update() copies off the request-body User:
-// sub, firstName, lastName, email (only these four are overwritten — see UserAdminService.update).
+// userUpdateReq holds the mutable fields userUpdate copies off the request-body user:
+// sub, firstName, lastName, email (only these four are overwritten).
 type userUpdateReq struct {
 	Sub       string `json:"sub"`
 	FirstName string `json:"firstName"`
@@ -82,7 +82,7 @@ type userUpdateReq struct {
 	Email     string `json:"email"`
 }
 
-// userGet handles getUser(id) = userService.getById: findById(_id)-or-404 → single(user).
+// userGet loads a user by id: load by _id or 404, then return the single user.
 func (h *Handler) userGet(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, userReadPerm) {
 		return
@@ -99,8 +99,8 @@ func (h *Handler) userGet(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, u)
 }
 
-// userBySub handles getUserBySub(sub) = userService.getBySub (findBySubOrderByCreatedAtDesc): a null
-// user is wrapped in single(null) → empty {} envelope (the null data is dropped), NOT a 404.
+// userBySub loads the newest user with the given sub. A missing user is returned as an
+// empty {} envelope (the null data is dropped), NOT a 404.
 func (h *Handler) userBySub(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, userReadPerm) {
 		return
@@ -116,10 +116,9 @@ func (h *Handler) userBySub(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, u)
 }
 
-// userByProject handles getUserByProject(projectId): projectAdminService.getProject =
-// projectService.getProjectById (findById(_id)-or-404 "The project with id %s was not found. "),
-// then userService.getUserBySub(project.getProjectOwner()) — owner sub from the OWNER membership
-// (else the project's `owner` field). A null user → single(null) → {}.
+// userByProject loads the project by id (or 404 "The project with id %s was not found. "),
+// then loads the user by the project owner's sub — taken from the OWNER membership
+// (else the project's `owner` field). A missing user → empty {}.
 func (h *Handler) userByProject(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, userReadPerm) {
 		return
@@ -145,11 +144,10 @@ func (h *Handler) userByProject(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, u)
 }
 
-// userExternalServices handles getUserExternalServices(id): getById-or-404, then
-// platformExternalService.listByUser(user) mapped to ExternalServiceDto. The user resolve (404 path)
-// is the faithful behavior; the live OpenStack external-service listing is a cloud integration point
-// (cloud-admin), so under greenfield the list is empty → {data:[], paging}. (Same stub posture
-// as the existing /admin/service/{id}/user/services endpoint.)
+// userExternalServices loads the user by id (or 404), then lists that user's external services
+// as DTOs. The user resolve (404 path) is the real behavior; the live OpenStack external-service
+// listing is a cloud integration point (cloud-admin), so under greenfield the list is empty →
+// {data:[], paging}. (Same stub posture as the existing /admin/service/{id}/user/services endpoint.)
 func (h *Handler) userExternalServices(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, userReadPerm) {
 		return
@@ -163,14 +161,13 @@ func (h *Handler) userExternalServices(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, userNotFound(id))
 		return
 	}
-	// External integration point: PlatformExternalService.listByUser → live OpenStack external services (cloud-admin).
+	// External integration point: list the user's live OpenStack external services (cloud-admin).
 	httpx.List(w, []any{})
 }
 
-// userUpdate handles update(id, User) = userService.update: getById-or-404 → overwrite
-// sub/firstName/lastName/email off the request body → save → single(saved). Only those four fields
-// are copied (the update copies exactly sub/firstName/lastName/email); all other persisted fields
-// are preserved.
+// userUpdate loads the user by id (or 404) → overwrites
+// sub/firstName/lastName/email off the request body → saves → returns the saved user. Only those four
+// fields are copied; all other persisted fields are preserved.
 func (h *Handler) userUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, userUpdatePerm) {
 		return
@@ -190,9 +187,9 @@ func (h *Handler) userUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := maps.Clone(existing)
-	// Overwrite the four mutable fields. The setters assign unconditionally (a null/blank request
-	// value would null the field); we mirror that — set the value, and drop the key when blank so the
-	// stored doc / null-omitting JSON matches a null assignment.
+	// Overwrite the four mutable fields unconditionally: a null/blank request value clears the field —
+	// set the value, and drop the key when blank so the stored doc / null-omitting JSON matches a
+	// cleared field.
 	for k, v := range map[string]string{"sub": req.Sub, "firstName": req.FirstName, "lastName": req.LastName, "email": req.Email} {
 		if v == "" {
 			delete(existing, k)
@@ -203,19 +200,18 @@ func (h *Handler) userUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.ReplaceDoc(r.Context(), userCollection, id, existing); httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE USER: field-level diff (middleware computes diffSnapshots(before, after)).
+	// UPDATE USER audit: field-level before/after diff (the middleware computes the snapshot diff).
 	after, _ := h.repo.FindDoc(r.Context(), userCollection, id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// userDelete handles delete(id): getUser(id)-or-404, then if projectAdminService.isUserInUse(sub)
-// → 400 "User is in use for projects"; else UserAdminService.delete = onCleanUpUser (delete the
-// user's per-service keystone users — OpenstackUserService.deleteOpenStackUser per NON-SHARED
-// openstack service in user.services[], via config.openstackUserId) → deleteById + audit; a failed
-// keystone delete → 400 "Cannot delete user ". Greenfield users carry no services[] (the
-// bootstrap creates no per-customer keystone users) → allMatch over the empty set = true → plain
-// Datastore delete.
+// userDelete loads the user by id (or 404); if the user still owns projects → 400 "User is in use
+// for projects"; else cleans up the user (delete the user's per-service keystone users — one per
+// NON-SHARED openstack service in user.services[], via config.openstackUserId) → delete the user +
+// audit; a failed keystone delete → 400 "Cannot delete user ". Greenfield users carry no services[]
+// (the bootstrap creates no per-customer keystone users) → the cleanup set is empty → plain
+// datastore delete.
 func (h *Handler) userDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, userDeletePerm) {
 		return
@@ -243,14 +239,14 @@ func (h *Handler) userDelete(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.deleteUserByID(r.Context(), id); httpx.WriteError(w, err) {
 		return
 	}
-	// DELETE USER audit (auditAdmin PLATFORM — the middleware emits the admin event).
+	// DELETE USER audit (PLATFORM scope — the middleware emits the admin event).
 	httpx.OK(w, "Successful operation")
 }
 
-// cleanUpUser handles onCleanUpUser: for each of the user's attached
-// NON-SHARED openstack services, keystone-delete config.openstackUserId; allMatch gates the datastore
-// delete. Writes the response (400 "Cannot delete user " / 501 when a cleanup is needed but the
-// cloud factory is unwired) and returns false when the caller must stop.
+// cleanUpUser deletes the user's per-service keystone identities: for each of the user's attached
+// NON-SHARED openstack services, keystone-delete config.openstackUserId; all must succeed to allow the
+// datastore delete. Writes the response (400 "Cannot delete user " / 501 when a cleanup is needed but
+// the cloud factory is unwired) and returns false when the caller must stop.
 func (h *Handler) cleanUpUser(w http.ResponseWriter, r *http.Request, userID string) bool {
 	raw, err := h.repo.FindDoc(r.Context(), "users", userID)
 	if httpx.WriteError(w, err) {
@@ -282,7 +278,7 @@ func (h *Handler) cleanUpUser(w http.ResponseWriter, r *http.Request, userID str
 		es, err := h.esSvc.Get(r.Context(), esID)
 		if err != nil || es == nil || es.Type != externalservice.TypeCloud ||
 			es.Provider() != "openstack" || es.Shared() {
-			continue // filters isOpenStack + isNotShared
+			continue // skip anything that isn't a non-shared OpenStack service
 		}
 		cc, cerr := h.cloudClient(r.Context(), es, h.serviceRegions(es)[0])
 		if cerr != nil || cc == nil {
@@ -301,12 +297,11 @@ func (h *Handler) cleanUpUser(w http.ResponseWriter, r *http.Request, userID str
 	return true
 }
 
-// userCreate handles create(AddUserRequest): findFirstByEmail → 400 "User with this email already
-// exists" if taken; else UserService.create — which is a plain datastore upsert-by-email (sub = random
-// UUID, NO password/credential, NO identity-provider call: the identity stack is the embedded
-// auth server over this same `users` collection) — then best-effort
-// projectInviteService.inviteToProject per projectId (each caught + logged). Returns the
-// created User (findBySubOrderByCreatedAtDesc).
+// userCreate rejects a duplicate email → 400 "User with this email already exists"; else does a
+// plain datastore upsert-by-email (sub = random UUID, NO password/credential, NO identity-provider
+// call: the identity stack is the embedded auth server over this same `users` collection) — then
+// best-effort invites the user to each projectId (each caught + logged). Returns the created user
+// (newest by sub).
 func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, userCreatePerm) {
 		return
@@ -366,12 +361,11 @@ func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, created)
 }
 
-// userImpersonate handles impersonate(id): ImpersonationService.impersonate — getUser(id)-or-404
-// "User not found", then the embedded authorization server MINTS local OAuth2 tokens
-// (RegisteredClient "cloud-dashboard", grant JWT_BEARER) and returns
+// userImpersonate loads the user by id (or 404 "User not found"); the embedded authorization server
+// would then MINT local OAuth2 tokens (client "cloud-dashboard", grant JWT_BEARER) and return
 // {"url": "<ui>/login#access_token=…&id_token=…"}. DIVERGENT BY DESIGN: token
 // issuance belongs to Keycloak and this service is a pure OIDC resource server — it cannot mint
-// tokens the UI would accept. Stays 501 after the faithful user-exists check. (A Keycloak
+// tokens the UI would accept. Stays 501 after the user-exists check. (A Keycloak
 // token-exchange/impersonation leg would be a NEW feature — do only on request.)
 func (h *Handler) userImpersonate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, userImpersonatePerm) {
@@ -383,12 +377,12 @@ func (h *Handler) userImpersonate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if u == nil {
-		// ImpersonationService throws notFound("User not found") when the target user is absent.
+		// Return 404 "User not found" when the target user is absent.
 		httpx.WriteError(w, httpx.NotFound("User not found"))
 		return
 	}
-	// Not implemented: token generation / OAuth2 authorization (cloud-dashboard client) → ImpersonationResult
-	// {redirectUrl, accessToken, idToken}; the controller returns single(Map.of("url", redirectUrl)).
+	// Not implemented: token generation / OAuth2 authorization (cloud-dashboard client) producing
+	// {redirectUrl, accessToken, idToken}, returned as {"url": redirectUrl}.
 	// The Go service issues no tokens (pure OIDC resource server). TODO(audit): IMPERSONATE event.
 	httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
 		"impersonation token generation not implemented"))

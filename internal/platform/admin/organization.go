@@ -11,21 +11,20 @@ package admin
 //   create                ADMIN_ORGANIZATION_UPDATE  (admin:organization:update)
 //   update                ADMIN_ORGANIZATION_UPDATE
 //   delete                ADMIN_ORGANIZATION_DELETE  (admin:organization:delete)
-//   getMembers            ADMIN_ORGANIZATION_READ    (admin:organization:read)
+//   members               ADMIN_ORGANIZATION_READ    (admin:organization:read)
 //   updateMemberRole      ADMIN_ORGANIZATION_UPDATE
 //   addMember             ADMIN_ORGANIZATION_UPDATE
 //   removeMember          ADMIN_ORGANIZATION_UPDATE
 //
-// Response = CustomHttpResponse.single(OrganizationDto) for the org mutations / list(members) for
-// getMembers. OrganizationDto extends Organization (all org fields) + projectCount/memberCount
+// Response = a single OrganizationDto for the org mutations / a list of members for
+// the members read. OrganizationDto carries all org fields + projectCount/memberCount
 // (primitive longs, always emitted) + a populated billingProfile (omitted when null) +
 // currentUserRole/currentUserPermissions (null on the admin path → omitted).
 //
-// EXTERNAL INTEGRATION POINTS (NOT live): the createBillingProfile=true create branch routes through
-// OrganizationService.createOrganization → BillingProfileService.createBillingProfile (billing
-// orchestration not wired into admin.Handler) → 501. The addMember/removeMember project-membership
-// cascade (projectManagerAdminService.add/removeUserToProject — per-project, best-effort, swallowed)
-// is DEFERRED (the org-membership datastore change + the toDto response are faithful). Audit is
+// EXTERNAL INTEGRATION POINTS (NOT live): the createBillingProfile=true create branch would route
+// through billing orchestration to create a billing profile, which is not wired into admin.Handler → 501.
+// The addMember/removeMember project-membership cascade (per-project, best-effort, swallowed)
+// is DEFERRED (the org-membership datastore change + the DTO response are faithful). Audit is
 // deferred (// TODO(audit)).
 
 import (
@@ -58,7 +57,7 @@ const (
 	orgDeletePerm = "admin:organization:delete"
 )
 
-// routeOrganization registers the OrganizationAdminController mutation routes (+ the un-registered
+// routeOrganization registers the organization admin mutation routes (+ the un-registered
 // GET /{id}/members read). The bare/by-id/by-billing-profile/by-member reads are already in
 // handler.go and are NOT re-registered here.
 func (h *Handler) routeOrganization(r chi.Router) {
@@ -99,7 +98,7 @@ type updateOrganizationMemberRoleReq struct {
 }
 
 // organizationList returns every org as the rich
-// OrganizationDto (toDto = id + memberCount + projectCount + populated billingProfile), NOT the raw
+// OrganizationDto (id + memberCount + projectCount + populated billingProfile), NOT the raw
 // doc. ADMIN_ORGANIZATION_READ.
 func (h *Handler) organizationList(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:organization:read") {
@@ -182,8 +181,8 @@ func orgHexID(v any) string {
 	return ""
 }
 
-// organizationCreate handles createOrganization (ADMIN_ORGANIZATION_UPDATE). Validation order is
-// faithful: name not-null → (createBillingProfile && ownerSub==null) 400 → (billingProfileId &&
+// organizationCreate handles organization creation (ADMIN_ORGANIZATION_UPDATE). Validation order:
+// name not-null → (createBillingProfile && ownerSub==null) 400 → (billingProfileId &&
 // createBillingProfile) 400 mutually-exclusive → resolve owner (404 when ownerSub set but missing).
 // The createBillingProfile=true branch creates the owner-populated BillingProfile via
 // billing.CreateForOrganization (same as client onboarding) and links it; the plain branch is
@@ -198,7 +197,7 @@ func (h *Handler) organizationCreate(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
 		return
 	}
-	// Assert.notNull(request.getName(), ...) — an Assert failure is an IllegalArgumentException → 400.
+	// Require a non-null name; a missing name is a 400.
 	if req.Name == "" {
 		httpx.WriteError(w, httpx.BadRequest("Organization name must not be null"))
 		return
@@ -211,7 +210,7 @@ func (h *Handler) organizationCreate(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("billing_profile_id and create_billing_profile are mutually exclusive"))
 		return
 	}
-	// Resolve the owner (when ownerSub is supplied): getBySub → 404 "User not found with sub: <sub>".
+	// Resolve the owner (when ownerSub is supplied): look up by sub → 404 "User not found with sub: <sub>".
 	var owner *user.User
 	if req.OwnerSub != "" {
 		o, err := h.users.FindBySub(r.Context(), req.OwnerSub)
@@ -245,8 +244,8 @@ func (h *Handler) organizationCreate(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case req.CreateBillingProfile:
 		// createBillingProfile=true → owner is guaranteed (validated above). Create the owner-populated
-		// BillingProfile (StatusNew, base currency) and link it — mirrors the client onboarding
-		// org.Service.CreateOrganization → billing.CreateForOrganization.
+		// BillingProfile (StatusNew, base currency) and link it via billing.CreateForOrganization —
+		// the same path as client onboarding.
 		bpID, err := h.billing.CreateForOrganization(r.Context(), orgID, billing.Owner{
 			Sub: owner.Sub, Email: owner.Email, FirstName: owner.FirstName, LastName: owner.LastName, FullName: owner.FullName(),
 		})
@@ -258,13 +257,13 @@ func (h *Handler) organizationCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		saved["billingProfileId"] = bpID
 	case req.BillingProfileID != "":
-		// A supplied billingProfileId is validated (getBillingProfileById throws if missing) — perform
-		// the read to keep the side effect faithful, ignoring the populated DTO.
+		// A supplied billingProfileId is validated by loading it — perform
+		// the read to keep the side effect, ignoring the populated DTO.
 		if _, err := h.repo.BillingProfileByIDRaw(r.Context(), req.BillingProfileID); httpx.WriteError(w, err) {
 			return
 		}
 	}
-	// TODO(audit): auditAdmin(organization, CREATE, ORGANIZATION)
+	// TODO(audit): write an admin audit event for the organization creation.
 	dto, err := h.orgToDto(r.Context(), saved)
 	if httpx.WriteError(w, err) {
 		return
@@ -272,8 +271,8 @@ func (h *Handler) organizationCreate(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, dto)
 }
 
-// organizationUpdate handles updateOrganization (ADMIN_ORGANIZATION_UPDATE): getOrganization-or-404 →
-// set name/description/billingProfileId only when the request field is non-null → save → single(dto).
+// organizationUpdate handles organization updates (ADMIN_ORGANIZATION_UPDATE): load the org (404 when absent),
+// set name/description/billingProfileId only when the request field is non-null, save, and return the dto.
 func (h *Handler) organizationUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, orgUpdatePerm) {
 		return
@@ -305,7 +304,7 @@ func (h *Handler) organizationUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.OrgReplace(r.Context(), id, org); httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE ORGANIZATION: field-level diff (middleware computes diffSnapshots(before, after)).
+	// UPDATE ORGANIZATION: record a field-level diff of the before/after snapshots.
 	after, _ := h.repo.OrgFindByID(r.Context(), id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	dto, err := h.orgToDto(r.Context(), org)
@@ -315,9 +314,9 @@ func (h *Handler) organizationUpdate(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, dto)
 }
 
-// organizationDelete handles deleteOrganization (ADMIN_ORGANIZATION_DELETE): getOrganization-or-404 →
-// projectCount>0 400 "Cannot delete organization with associated projects..." → delete all members →
-// delete the org → success("Successful operation").
+// organizationDelete handles organization deletion (ADMIN_ORGANIZATION_DELETE): load the org (404 when absent),
+// reject with 400 "Cannot delete organization with associated projects..." when projectCount>0, delete all
+// members, delete the org, and respond "Successful operation".
 func (h *Handler) organizationDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, orgDeletePerm) {
 		return
@@ -345,7 +344,7 @@ func (h *Handler) organizationDelete(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.OrgDelete(r.Context(), id); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(organization, DELETE, ORGANIZATION)
+	// TODO(audit): write an admin audit event for the organization deletion.
 	httpx.OK(w, "Successful operation")
 }
 
@@ -358,8 +357,8 @@ type organizationMemberDto struct {
 	Role      string `json:"role,omitempty"`
 }
 
-// organizationMembers handles getMembers (ADMIN_ORGANIZATION_READ): getOrganization-or-404 → for each
-// membership, enrich with the User's name/email (when a User exists) → list(members).
+// organizationMembers handles the members read (ADMIN_ORGANIZATION_READ): load the org (404 when absent), then for each
+// membership, enrich with the user's name/email (when a user exists) and return the list.
 func (h *Handler) organizationMembers(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, orgReadPerm) {
 		return
@@ -389,9 +388,9 @@ func (h *Handler) organizationMembers(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, out)
 }
 
-// organizationUpdateMemberRole handles updateMemberRole (ADMIN_ORGANIZATION_UPDATE):
-// getOrganization-or-404 → getMember-or-404 "User is not a member of this organization" →
-// updateRole → single(dto).
+// organizationUpdateMemberRole handles the update-member-role endpoint (ADMIN_ORGANIZATION_UPDATE):
+// load the org (404 when absent), load the membership (404 "User is not a member of this organization"),
+// update the role, and return the dto.
 func (h *Handler) organizationUpdateMemberRole(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, orgUpdatePerm) {
 		return
@@ -422,7 +421,7 @@ func (h *Handler) organizationUpdateMemberRole(w http.ResponseWriter, r *http.Re
 	if err := h.repo.OrgUpdateMemberRole(r.Context(), id, userSub, req.Role); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(organization, CHANGE_ROLE, ORGANIZATION, {member, newRole})
+	// TODO(audit): write an admin audit event recording the member's role change.
 	dto, err := h.orgToDto(r.Context(), org)
 	if httpx.WriteError(w, err) {
 		return
@@ -430,11 +429,11 @@ func (h *Handler) organizationUpdateMemberRole(w http.ResponseWriter, r *http.Re
 	httpx.OK(w, dto)
 }
 
-// organizationAddMember handles addMember (ADMIN_ORGANIZATION_UPDATE): resolve the user by _id
-// (getById) → 400 "User with id <id> not found" → getOrganization-or-404 → already-member 400
-// "User is already a member of this organization" → re-resolve the user by sub (getBySub) → 400
-// "User with sub <sub> not found" → addMember → single(dto). The per-project membership cascade
-// (projectManagerAdminService.addUserToProject, best-effort/swallowed) is DEFERRED.
+// organizationAddMember handles the add-member endpoint (ADMIN_ORGANIZATION_UPDATE): resolve the user by id
+// → 400 "User with id <id> not found" → load the org (404 when absent) → already-member 400
+// "User is already a member of this organization" → re-resolve the user by sub → 400
+// "User with sub <sub> not found" → add the member → return the dto. The per-project membership cascade
+// (best-effort/swallowed) is DEFERRED.
 func (h *Handler) organizationAddMember(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, orgUpdatePerm) {
 		return
@@ -445,7 +444,7 @@ func (h *Handler) organizationAddMember(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
 		return
 	}
-	// addMemberByUserId: userService.getById(userId) → 400 "User with id <id> not found".
+	// Resolve the user by id → 400 "User with id <id> not found".
 	memberUser, err := h.repo.UserByID(r.Context(), req.UserID)
 	if httpx.WriteError(w, err) {
 		return
@@ -455,7 +454,7 @@ func (h *Handler) organizationAddMember(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	sub := userSub(memberUser)
-	// addMember: getOrganization → 404.
+	// Load the org → 404 when absent.
 	org, err := h.repo.OrgFindByID(r.Context(), id)
 	if httpx.WriteError(w, err) {
 		return
@@ -464,7 +463,7 @@ func (h *Handler) organizationAddMember(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, httpx.NotFound("Organization not found"))
 		return
 	}
-	// isMember → 400 "User is already a member of this organization".
+	// Already a member → 400 "User is already a member of this organization".
 	existing, err := h.repo.OrgMember(r.Context(), id, sub)
 	if httpx.WriteError(w, err) {
 		return
@@ -473,7 +472,7 @@ func (h *Handler) organizationAddMember(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, httpx.BadRequest("User is already a member of this organization"))
 		return
 	}
-	// userService.getBySub(userSub) → 400 "User with sub <sub> not found" (re-resolve, faithful).
+	// Re-resolve the user by sub → 400 "User with sub <sub> not found".
 	resolved, err := h.users.FindBySub(r.Context(), sub)
 	if httpx.WriteError(w, err) {
 		return
@@ -485,8 +484,8 @@ func (h *Handler) organizationAddMember(w http.ResponseWriter, r *http.Request) 
 	if err := h.repo.OrgAddMember(r.Context(), id, sub, req.Role); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(organization, ADD_MEMBER, ORGANIZATION, {member, role})
-	// TODO(cascade): projectManagerAdminService.addUserToProject for each org project (best-effort).
+	// TODO(audit): write an admin audit event recording the added member.
+	// TODO(cascade): add the user to each of the org's projects (best-effort).
 	dto, err := h.orgToDto(r.Context(), org)
 	if httpx.WriteError(w, err) {
 		return
@@ -494,10 +493,9 @@ func (h *Handler) organizationAddMember(w http.ResponseWriter, r *http.Request) 
 	httpx.OK(w, dto)
 }
 
-// organizationRemoveMember handles removeMember (ADMIN_ORGANIZATION_UPDATE): getOrganization-or-404 →
-// isUserOwner 400 "Cannot remove organization owner" → removeMember → single(dto). The per-project
-// membership-removal cascade (projectManagerAdminService.removeUserFromProject, best-effort/
-// swallowed) is DEFERRED.
+// organizationRemoveMember handles the remove-member endpoint (ADMIN_ORGANIZATION_UPDATE): load the org
+// (404 when absent) → owner check 400 "Cannot remove organization owner" → remove the member → return
+// the dto. The per-project membership-removal cascade is applied best-effort (see below).
 func (h *Handler) organizationRemoveMember(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, orgUpdatePerm) {
 		return
@@ -512,7 +510,7 @@ func (h *Handler) organizationRemoveMember(w http.ResponseWriter, r *http.Reques
 		httpx.WriteError(w, httpx.NotFound("Organization not found"))
 		return
 	}
-	// isUserOwner: the membership's role == OWNER → 400 "Cannot remove organization owner".
+	// Owner check: the membership's role == OWNER → 400 "Cannot remove organization owner".
 	member, err := h.repo.OrgMember(r.Context(), id, userSub)
 	if httpx.WriteError(w, err) {
 		return
@@ -525,12 +523,12 @@ func (h *Handler) organizationRemoveMember(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	// Cascade: a removed org member must also lose their memberships on the org's projects — else
-	// they retain project access after being removed from the org. Best-effort (mirrors
-	// projectManagerAdminService.removeUserFromProject, swallowed).
+	// they retain project access after being removed from the org. Best-effort (errors are logged
+	// and swallowed).
 	if err := h.repo.removeMemberFromOrgProjects(r.Context(), id, userSub); err != nil {
 		slog.Error("cascade remove org member from org projects failed", "org", id, "sub", userSub, "err", err)
 	}
-	// TODO(audit): auditAdmin(organization, REMOVE_MEMBER, ORGANIZATION, {member})
+	// TODO(audit): write an admin audit event recording the removed member.
 	dto, err := h.orgToDto(r.Context(), org)
 	if httpx.WriteError(w, err) {
 		return

@@ -64,7 +64,7 @@ func (req customMenuItemReq) doc() pgdoc.M {
 	return d
 }
 
-// menuList handles list(): findAll sorted by `order` asc → list envelope.
+// menuList lists all custom menu items sorted by `order` asc → list envelope.
 func (h *Handler) menuList(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, menuPerm) {
 		return
@@ -79,7 +79,7 @@ func (h *Handler) menuList(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, items)
 }
 
-// menuCreate handles create(): save → single(saved).
+// menuCreate inserts a new custom menu item and returns it.
 func (h *Handler) menuCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, menuPerm) {
 		return
@@ -93,11 +93,11 @@ func (h *Handler) menuCreate(w http.ResponseWriter, r *http.Request) {
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(result, CREATE, PLATFORM)
+	// TODO(audit): write an admin audit event when a menu item is created.
 	httpx.OK(w, shapeDoc(saved))
 }
 
-// menuUpdate handles update(): findById-or-404 → overwrite the 5 fields → save → single.
+// menuUpdate looks up the item by id (404 if absent), overwrites its 5 fields, saves, and returns it.
 func (h *Handler) menuUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, menuPerm) {
 		return
@@ -127,13 +127,13 @@ func (h *Handler) menuUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.ReplaceDoc(r.Context(), menuCollection, id, existing); httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE audit: field-level diff (middleware computes diffSnapshots(before, after)).
+	// UPDATE audit: field-level diff — the middleware diffs the before/after snapshots.
 	after, _ := h.repo.FindDoc(r.Context(), menuCollection, id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// menuDelete handles delete(): findById-or-404 → deleteById → success("Successful operation").
+// menuDelete looks up the item by id (404 if absent), deletes it, and returns "Successful operation".
 func (h *Handler) menuDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, menuPerm) {
 		return
@@ -150,11 +150,11 @@ func (h *Handler) menuDelete(w http.ResponseWriter, r *http.Request) {
 	if _, err := h.repo.DeleteDoc(r.Context(), menuCollection, id); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(existing, DELETE, PLATFORM)
+	// TODO(audit): write an admin audit event when a menu item is deleted.
 	httpx.OK(w, "Successful operation")
 }
 
-// menuGet handles get(): findById-or-404 → single.
+// menuGet looks up the item by id (404 if absent) and returns it.
 func (h *Handler) menuGet(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, menuPerm) {
 		return
@@ -170,7 +170,7 @@ func (h *Handler) menuGet(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, shapeDoc(doc))
 }
 
-// menuReorder handles reorder(): for each id at index i, set order=i (404 if any id is missing).
+// menuReorder sets order=i for each id at index i (404 if any id is missing).
 func (h *Handler) menuReorder(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, menuPerm) {
 		return
@@ -198,7 +198,7 @@ func (h *Handler) menuReorder(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, "Successful operation")
 }
 
-// menuPlaceholders handles getPlaceholders(): the static URL placeholder map.
+// menuPlaceholders returns the static URL placeholder map.
 func (h *Handler) menuPlaceholders(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, menuPerm) {
 		return

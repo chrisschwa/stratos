@@ -8,16 +8,16 @@ package admin
 // Behavior:
 //   - create:  daysValidity<=0 → 400 "Days validity must be greater than 0"; amount==null||<=0 →
 //              400 "Amount must be greater than 0"; else persist {initialAmount, remainingAmount,
-//              expirationDate=now+daysValidity days, billingProfileId, code=null} → single(credit).
-//   - list:    findAllByBillingProfileId → list envelope.
-//   - delete:  findById → if present delete (audit); ABSENT is a SILENT no-op (NO 404) → success()
-//              ("Successful operation").
-//   - update:  findByIdAndBillingProfileId; if present mutate (amount→initial+remaining,
-//              daysValidity!=0→new expiration, code!=null→code) + save; the method ALWAYS
-//              returns null regardless → single(null) → an empty {} envelope. The PUT also reuses
+//              expirationDate=now+daysValidity days, billingProfileId, code=null} → the credit.
+//   - list:    all credits for the billing profile → list envelope.
+//   - delete:  load by id → if present delete (audit); ABSENT is a SILENT no-op (NO 404) →
+//              "Successful operation".
+//   - update:  load by (id, billingProfileId); if present mutate (amount→initial+remaining,
+//              daysValidity!=0→new expiration, code!=null→code) + save; the handler ALWAYS
+//              returns null regardless → an empty {} envelope. The PUT also reuses
 //              the request's billingProfileId as the match key.
 //
-// Each mutation is audited (auditService.auditAdmin) — deferred this pass (// TODO(audit)); state +
+// Each mutation is audited — deferred this pass (// TODO(audit)); state +
 // response are faithful, which is what the admin UI exercises. Perms: create/update/delete gate
 // ADMIN_PROMOTIONAL_CREDIT_MANAGE; list gates ADMIN_ACCOUNT_CREDIT_READ (matching the
 // authorization on each method).
@@ -72,13 +72,13 @@ func (req createPromotionalCreditReq) amountDecimal() (amt decimal.Decimal, ok b
 	return d, true, nil
 }
 
-// addDays adds calendar days to `now` (DAY_OF_MONTH advance) — DST-naive at UTC, matching the
-// server's Instant arithmetic well enough for the stored date.
+// addDays adds calendar days to `now` — DST-naive at UTC, matching the original day-based
+// advance well enough for the stored date.
 func addDays(now time.Time, days int) time.Time {
 	return now.AddDate(0, 0, days)
 }
 
-// promoCreditCreate handles create(): validate daysValidity>0 and amount>0, persist, single(credit).
+// promoCreditCreate creates a promotional credit: validate daysValidity>0 and amount>0, persist, return the credit.
 func (h *Handler) promoCreditCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, promoCreditManagePerm) {
 		return
@@ -88,7 +88,7 @@ func (h *Handler) promoCreditCreate(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
 		return
 	}
-	// Order: create() checks daysValidity FIRST, then saveCredit() checks amount.
+	// Order: check daysValidity FIRST, then amount.
 	if req.DaysValidity <= 0 {
 		httpx.WriteError(w, httpx.BadRequest("Days validity must be greater than 0"))
 		return
@@ -114,11 +114,11 @@ func (h *Handler) promoCreditCreate(w http.ResponseWriter, r *http.Request) {
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditService.auditAdmin(credit, CREATE, ORGANIZATION, {"amount": amount})
+	// TODO(audit): write a CREATE admin audit event for the credit (amount).
 	httpx.OK(w, shapeDoc(saved))
 }
 
-// promoCreditList handles list(): findAllByBillingProfileId → list envelope.
+// promoCreditList lists all promotional credits for a billing profile → list envelope.
 func (h *Handler) promoCreditList(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, promoCreditReadPerm) {
 		return
@@ -134,9 +134,9 @@ func (h *Handler) promoCreditList(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, items)
 }
 
-// promoCreditUpdate handles update(id, billingProfileId, amount, daysValidity, null): looks the credit
+// promoCreditUpdate updates a promotional credit: looks the credit
 // up by (id, request.billingProfileId); if present, conditionally mutates fields and saves. The
-// method ALWAYS returns null (even when found), so the response is single(null) → an empty {}
+// handler ALWAYS returns null (even when found), so the response is an empty {}
 // envelope (httpx.Empty) in BOTH the found and not-found cases.
 func (h *Handler) promoCreditUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, promoCreditManagePerm) {
@@ -162,22 +162,22 @@ func (h *Handler) promoCreditUpdate(w http.ResponseWriter, r *http.Request) {
 		if req.DaysValidity != 0 {
 			set["expirationDate"] = addDays(time.Now().UTC(), req.DaysValidity)
 		}
-		// code is always null on this path (update(..., null)) → never set.
+		// code is always null on this path → never set.
 		if len(set) > 0 {
 			if _, err := h.repo.SetFields(r.Context(), promotionalCreditColl, id, set); httpx.WriteError(w, err) {
 				return
 			}
 		}
 	}
-	// UPDATE audit: field-level diff (middleware computes diffSnapshots(before, after)).
+	// UPDATE audit: field-level diff (the middleware diffs before vs after).
 	after, _ := h.repo.FindDoc(r.Context(), promotionalCreditColl, id)
 	audit.RecordSnapshots(r.Context(), before, after)
-	// Returns null unconditionally → single(null) → {} envelope.
+	// Returns null unconditionally → {} envelope.
 	httpx.Empty(w)
 }
 
-// promoCreditDelete handles delete(id): findById → if present delete (audit). ABSENT = SILENT no-op
-// (NO 404 — Optional.ifPresent). Returns success() → "Successful operation" either way.
+// promoCreditDelete deletes a promotional credit: load by id → if present delete (audit). ABSENT =
+// SILENT no-op (NO 404). Returns "Successful operation" either way.
 func (h *Handler) promoCreditDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, promoCreditManagePerm) {
 		return
@@ -191,7 +191,7 @@ func (h *Handler) promoCreditDelete(w http.ResponseWriter, r *http.Request) {
 		if _, err := h.repo.DeleteDoc(r.Context(), promotionalCreditColl, id); httpx.WriteError(w, err) {
 			return
 		}
-		// TODO(audit): auditService.auditAdmin(pc, DELETE, ORGANIZATION)
+		// TODO(audit): write a DELETE admin audit event for the credit.
 	}
 	httpx.OK(w, "Successful operation")
 }

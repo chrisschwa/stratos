@@ -141,8 +141,8 @@ func (h *BillingHandler) callbackSeam(w http.ResponseWriter, r *http.Request) {
 	httpx.Err(w, http.StatusNotImplemented, http.StatusNotImplemented, "payment/KYC gateway not configured")
 }
 
-// requireBillingProfileRead resolves getBillingProfile(sub,id):
-// profile-by-id 404 (interpolated) → org-by-profile.organizationId 404 "Billing Profile has
+// requireBillingProfileRead resolves and read-gates a profile:
+// load the profile by id → 404 (interpolated) if absent → resolve its org, 404 "Billing Profile has
 // no organization associated" → BILLING_PROFILE_READ 403. Used by the bill/promotional-credit/
 // savings client list endpoints.
 func (h *BillingHandler) requireBillingProfileRead(w http.ResponseWriter, r *http.Request, u *user.User, bpID string) (*billing.BillingProfile, bool) {
@@ -290,8 +290,8 @@ func (h *BillingHandler) bills(w http.ResponseWriter, r *http.Request) {
 }
 
 // billStatementDownload handles GET /bill/{bpId}/download/{billId}/
-// statement: the getBillingProfile(sub,id) read gate, the bill-of-profile 404
-// (findByIdAndBillingProfileId → "Bill %s not found "), then the consumption-summary statement PDF —
+// statement: the profile read gate, the bill-of-profile 404
+// ("Bill %s not found " when absent or owned by another profile), then the consumption-summary statement PDF —
 // the same billing.BillStatementPDF render the admin download streams. The PDF content type is set
 // explicitly so the browser doesn't sniff.
 func (h *BillingHandler) billStatementDownload(w http.ResponseWriter, r *http.Request) {
@@ -429,9 +429,9 @@ func (h *BillingHandler) accountCreditTransactions(w http.ResponseWriter, r *htt
 }
 
 // accountCreditTransaction gets one transaction by id:
-// requireUser → service.get(id) [findById → 404 "Transaction %s not found "]
-// → access-check getBillingProfile(user, txn.bp). The happy path's typed DTO + access check are
-// deferred; under the seed the collection is empty so the 404 path is what's exercised.
+// require the caller → load the transaction by id (404 "Transaction %s not found " if absent)
+// → access-check the caller against the transaction's billing profile. The happy path's typed DTO + access check are
+// deferred; under the seed the table is empty so the 404 path is what's exercised.
 func (h *BillingHandler) accountCreditTransaction(w http.ResponseWriter, r *http.Request) {
 	u, ok := h.principal(w, r)
 	if !ok {
@@ -447,7 +447,7 @@ func (h *BillingHandler) accountCreditTransaction(w http.ResponseWriter, r *http
 		fail(w, httpx.NotFound(fmt.Sprintf("Transaction %s not found ", id)))
 		return
 	}
-	// access-check getBillingProfile(user, txn.bp): a caller must be a reading member of the
+	// access-check against the transaction's billing profile: a caller must be a reading member of the
 	// transaction's billing profile — mirrors collectTransactionByID (no cross-tenant txn read).
 	if _, ok := h.requireBillingProfileRead(w, r, u, txn.BillingProfileID); !ok {
 		return
@@ -475,8 +475,8 @@ func (h *BillingHandler) collectTransactions(w http.ResponseWriter, r *http.Requ
 }
 
 // collectTransactionByID gets one collect transaction by id:
-// service.get(id) [404 "Transaction %s not found "] → access-check
-// getBillingProfile(user, txn.bp) → single DTO. Registered under the {billingProfileId} param name
+// load it by id (404 "Transaction %s not found ") → access-check the caller against
+// the transaction's billing profile → single DTO. Registered under the {billingProfileId} param name
 // (chi: it shares the tree node with the /{billingProfileId}/bill|download routes, so the param name
 // must match) but the value is the transaction id.
 func (h *BillingHandler) collectTransactionByID(w http.ResponseWriter, r *http.Request) {
@@ -606,7 +606,7 @@ func (h *BillingHandler) depositByCard(w http.ResponseWriter, r *http.Request) {
 func (h *BillingHandler) stripeFundsConfirm(w http.ResponseWriter, r *http.Request) {
 	txnID := chi.URLParam(r, "transactionId")
 	if _, err := h.addFunds.ProcessAddFunds(r.Context(), txnID); err != nil {
-		// log-and-redirect (returns RedirectView(uiBaseUrl) on any error).
+		// log-and-redirect (any error still redirects to the UI base URL).
 		http.Redirect(w, r, h.uiBaseURL, http.StatusFound)
 		return
 	}
@@ -819,8 +819,8 @@ func (h *BillingHandler) validationUpload(w http.ResponseWriter, r *http.Request
 }
 
 // createOrder computes per-item tax (profile tax
-// rates), totals, and persists an Order(status=CREATED). The order-visitor dispatch (SavingsContractOrder
-// Visitor) is deferred — savings contracts are created via their own endpoint.
+// rates), totals, and persists an Order(status=CREATED). Dispatching an order to a
+// type-specific handler is deferred — savings contracts are created via their own endpoint.
 func (h *BillingHandler) createOrder(w http.ResponseWriter, r *http.Request) {
 	u, ok := h.principal(w, r)
 	if !ok {
@@ -1129,8 +1129,8 @@ func (h *BillingHandler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if bp == nil {
-		// Dangling org→profile ref: getBillingProfileById(org.billingProfileId)
-		// throws the interpolated 404. Edge only (shouldn't happen).
+		// Dangling org→profile ref: loading the profile by org.billingProfileId
+		// yields the interpolated 404. Edge only (shouldn't happen).
 		fail(w, httpx.NotFound(fmt.Sprintf("Billing profile with id %s not found. ", o.BillingProfileID)))
 		return
 	}
@@ -1163,8 +1163,8 @@ func (h *BillingHandler) update(w http.ResponseWriter, r *http.Request) {
 }
 
 // create makes a fresh billing profile for an org the caller belongs to:
-// getOrganizationForUser (404 org / 400
-// non-member) → BILLING_PROFILE_CREATE (403) → createBillingProfile(org). The
+// resolve the org for the caller (404 org / 400
+// non-member) → BILLING_PROFILE_CREATE (403) → create the profile for the org. The
 // profile is built from the org's OWNER (not the caller) and does NOT update
 // organization.billingProfileId (a repeat call orphans a profile). Returns the
 // new profile's summary. NOTE: a blank organizationId validation returns `errors`
@@ -1191,7 +1191,7 @@ func (h *BillingHandler) create(w http.ResponseWriter, r *http.Request) {
 		fail(w, httpx.Forbidden("You do not have permission to perform this action: "+rbac.Description(rbac.BillingProfileCreate)))
 		return
 	}
-	// createBillingProfile(org): build from the org OWNER member's user.
+	// Create the profile for the org: build from the org OWNER member's user.
 	members, err := h.svc.Members(r.Context(), o.ID)
 	if err != nil {
 		fail(w, err)

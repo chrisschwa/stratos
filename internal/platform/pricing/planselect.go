@@ -2,7 +2,7 @@ package pricing
 
 // Price-plan selection. Implemented as pure functions over small source interfaces so
 // they are golden-testable now; the datastore-backed implementations of the interfaces
-// (findById / findAllByAccessModeAndEnabledIsTrue / getRulesByPricePlanIdAndTimeUnit)
+// (plan-by-id, the enabled public plans, and the rules for a plan and time unit)
 // land with the persistence slice. The BillingProfile's pricePlanConfig is passed as
 // (pricePlanIDs, includePublic) to keep this decoupled from the billing-profile type.
 

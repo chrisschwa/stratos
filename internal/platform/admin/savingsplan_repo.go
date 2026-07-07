@@ -22,7 +22,7 @@ func (r *Repo) InsertSavingsPlan(ctx context.Context, collection string, plan bi
 	return &plan, nil
 }
 
-// SavingsPlanByID loads a plan by id (findById): the typed plan, or (nil,nil) when absent.
+// SavingsPlanByID loads a plan by id: the typed plan, or (nil,nil) when absent.
 func (r *Repo) SavingsPlanByID(ctx context.Context, collection, id string) (*billing.SavingsPlan, error) {
 	var plan billing.SavingsPlan
 	found, err := r.c(collection).Get(ctx, id, &plan)
@@ -51,7 +51,7 @@ func (r *Repo) DeleteSavingsPlan(ctx context.Context, collection, id string) (in
 	return 0, nil
 }
 
-// AvailableSavingsPlans loads available plans (findByAvailable(true)): the typed plans
+// AvailableSavingsPlans loads the plans marked available: the typed plans
 // (never nil). The caller applies isEligibleForBillingProfile.
 func (r *Repo) AvailableSavingsPlans(ctx context.Context, collection string) ([]billing.SavingsPlan, error) {
 	out := []billing.SavingsPlan{}

@@ -22,7 +22,7 @@ import (
 )
 
 // txnRefunder is the narrow interface the admin refund + bank-transfer endpoints need
-// (refundFunds / processAddFunds-for-BankTransfer) — kept as an interface so admin
+// (refund + bank-transfer add-funds) — kept as an interface so admin
 // does not depend on the whole payment package.
 type txnRefunder interface {
 	RefundFunds(ctx context.Context, txnID string) (*billing.AccountCreditTransaction, error)
@@ -30,7 +30,7 @@ type txnRefunder interface {
 	// (APPROVED→credit the account, REJECTED→txn FAILED w/ comments as gatewayMessage).
 	ProcessBankTransfer(ctx context.Context, txnID, bankStatus, comments string) (*billing.AccountCreditTransaction, error)
 	// ProcessAddFunds re-drives the gateway confirm for a txn (Stripe PI retrieve / BankTransfer
-	// doc dispatch) — the admin syncTransaction endpoint is literally this call.
+	// doc dispatch) — the admin sync-transaction endpoint is literally this call.
 	ProcessAddFunds(ctx context.Context, txnID string) (*billing.AccountCreditTransaction, error)
 }
 
@@ -57,7 +57,7 @@ type Handler struct {
 	adminClientID string
 	activation    *billing.ActivationService // bp activate/suspend/resume orchestration (nil → 501)
 	projectCloud  *ProjectCloudOps           // live per-project cloud legs (nil → those endpoints stay 501)
-	// inviteToProject = ProjectInviteService.inviteToProject (admin user-create projectIds loop).
+	// inviteToProject invites a user to a project (admin user-create projectIds loop).
 	inviteToProject func(ctx context.Context, u *user.User, email, projectID string) error
 }
 
@@ -70,20 +70,19 @@ func (h *Handler) SetActivation(a *billing.ActivationService) { h.activation = a
 // corresponding endpoints as 501 (tests construct the Handler without them).
 type ProjectCloudOps struct {
 	// PauseServers nova-PAUSE/UNPAUSEs a project's cached servers via a tenant-scoped client
-	// (pauseServers/resumeServers; best-effort per server).
+	// (best-effort per server).
 	PauseServers func(ctx context.Context, projectID string, pause bool) error
-	// Sync runs the live resource sync for one project, optionally scoped to one service
-	// (syncProject → syncProjectLocked / syncExternalService).
+	// Sync runs the live resource sync for one project, optionally scoped to one service.
 	Sync func(ctx context.Context, projectID, serviceID string) error
 	// Bootstrap provisions a project onto an external service — create-or-reuse (or ADOPT
 	// adoptExternalProjectID) the keystone tenant + attach the ProjectExternalService entry
-	// (bootstrapProject with an explicit provision request).
+	// (with an explicit provision request).
 	Bootstrap func(ctx context.Context, projectID, esID, adoptExternalProjectID string) error
-	// CanDelete is the live pre-check gating scheduleProjectDeletion (project resolves / tenant
+	// CanDelete is the live pre-check gating a project-deletion schedule (project resolves / tenant
 	// reachable). nil → the endpoint stays 501.
 	CanDelete func(ctx context.Context, projectID string) error
-	// Teardown dispatches the async cloud cascade for deleteProjectNow (delete the project's cloud
-	// resources + tenant, then mark it DELETED). Returns fast (fire-and-forget). nil → 501.
+	// Teardown dispatches the async cloud cascade for an immediate project delete (delete the
+	// project's cloud resources + tenant, then mark it DELETED). Returns fast (fire-and-forget). nil → 501.
 	Teardown func(ctx context.Context, projectID string) error
 }
 
@@ -114,7 +113,7 @@ func (h *Handler) Routes(r chi.Router) {
 		r.Get("/account-credit-transactions/{id}/sync", h.accountCreditTxnSync)
 		r.Get("/collect-transactions/{id}/payment-gateway", h.txnByGateway("collectTransaction"))
 		r.Get("/credit-card-transaction/{id}/payment-gateway", h.txnByGateway("creditCardTransaction"))
-		// AuditAdminController.listAuditEvents — the global cursor-paginated audit log (all
+		// The global cursor-paginated audit log (all
 		// request interfaces; the org/account readers are scoped). Gated ADMIN_AUDIT_READ.
 		r.Get("/audit", h.auditList)
 		r.Get("/audit/export", h.auditExport)
@@ -124,18 +123,18 @@ func (h *Handler) Routes(r chi.Router) {
 		// integrations + hmac-keys lists go through secret-stripping handlers (NEVER leak credentials).
 		r.Get("/integrations", h.integrationsList)
 		r.Get("/hmac-keys", h.hmacKeysList)
-		// CustomMenuItemAdminController (full CRUD + reorder + placeholders) — see custommenu.go.
+		// Custom menu items (full CRUD + reorder + placeholders) — see custommenu.go.
 		h.routeCustomMenu(r)
-		// ImageGroupAdminController.getCategories (List<ImageCategory>); empty under greenfield.
+		// Image categories; empty under greenfield.
 		r.Get("/images/categories", h.listRaw("admin:image_group:manage", "imageCategory"))
-		// InstanceMetadataOptionAdminController.listAll; empty under greenfield.
+		// Instance metadata options; empty under greenfield.
 		r.Get("/instance-metadata-options", h.listRaw("admin:instance_metadata:manage", "instanceMetadataOption"))
-		// PricePlanAdminController.list; empty under greenfield (pricing not deployed).
+		// Price plans; empty under greenfield (pricing not deployed).
 		r.Get("/price-plan", h.listRaw("admin:price_plan:read", "pricePlan"))
-		// AccountCreditTransactionControllerAdmin.refundTransaction (Stripe refund a deposit).
+		// Refund a deposit's Stripe payment.
 		r.Post("/account-credit-transactions/refund/{id}", h.refundTransaction)
-		// PermissionAdminController.listPermissions: the client Permission enum metadata
-		// (key/description/resourceType) — deterministic, gated ADMIN_ROLE_READ.
+		// The client Permission metadata (key/description/resourceType) —
+		// deterministic, gated ADMIN_ROLE_READ.
 		r.Get("/permissions", h.permissions)
 		// Tax reads (TaxRate config; RO fixture on both datastores → comparison-testable).
 		r.Get("/tax", h.taxList)
@@ -148,35 +147,35 @@ func (h *Handler) Routes(r chi.Router) {
 		r.Get("/account-credit-transactions/{billingProfileId}/billing-profile", h.accountCreditTxnByBP)
 		r.Get("/collect-transactions/{billingProfileId}/billing-profile", h.collectTxnByBP)
 		r.Get("/credit-card-transaction/{billingProfileId}/billing-profile", h.creditCardTxnByBP)
-		// BillingConfigurationAdminController.getCountries/getCurrencies — static lists (PUBLIC,
-		// whitelisted in pkg/auth; no admin gate). Drive the country + Base-Currency dropdowns.
+		// Static country + currency lists (PUBLIC, whitelisted in pkg/auth; no admin gate).
+		// Drive the country + Base-Currency dropdowns.
 		r.Get("/billing/configuration/countries", h.adminCountries)
 		r.Get("/billing/configuration/currencies", h.adminCurrencies)
-		// AdminPermissionManagementController.listAvailablePermissions — the 58 AdminPermissionEnum
-		// {key,description} metadata (deterministic; gated ADMIN_PERMISSION_READ).
+		// The 58 admin-permission {key,description} metadata entries
+		// (deterministic; gated ADMIN_PERMISSION_READ).
 		r.Get("/admin-permissions/available-permissions", h.availablePermissions)
-		// BankTransferAdminController reads (raw BankTransfer domain; empty under greenfield).
+		// Bank-transfer reads (raw BankTransfer domain; empty under greenfield).
 		r.Get("/bank-transfer", h.bankTransferList)
 		r.Get("/bank-transfer/{id}", h.bankTransferByID)
-		// CloudResourceAdminController reads. by-id → findById (null → empty {}, NOT 404); the
+		// Cloud-resource reads. by-id → lookup (null → empty {}, NOT 404); the
 		// by-user / by-project list endpoints (empty under greenfield → {data:[],paging}).
 		r.Get("/cloud-resource/{id}", h.cloudResourceByID)
 		r.Get("/cloud-resource/user/{userId}", h.cloudResourcesByUser)
 		r.Get("/cloud-resource/project/{projectId}", h.cloudResourcesByProject)
-		// SuspensionAdminController.listByBillingProfileId — the suspension processes for a profile
+		// The suspension processes for a billing profile
 		// (empty under greenfield → {data:[],paging}; populated raw-domain DTO deferred).
 		r.Get("/suspensions/{billingProfileId}", h.suspensionsByBP)
-		// AdminRoleAdminController.listRoles — the 5 built-in admin roles (deterministic;
-		// custom adminRole-collection roles are appended but empty under greenfield).
+		// The 5 built-in admin roles (deterministic; custom adminRole-collection
+		// roles are appended but empty under greenfield).
 		r.Get("/admin-roles", h.adminRoles)
-		// ExternalResourceProviderAdminController.getExternalResourceProviders (empty list).
+		// External resource providers (empty list).
 		r.Get("/external-resource-providers", h.externalResourceProviders)
-		// AdminOnboardingController.getStatus — PUBLIC (whitelisted in pkg/auth); fully-onboarded
+		// Onboarding status — PUBLIC (whitelisted in pkg/auth); fully-onboarded
 		// (platform+billing config seeded, REMOTE_OIDC) → 404 "Onboarding already completed".
 		r.Get("/onboarding/status", h.onboardingStatus)
 		// By-id reads whose typed DTO is deferred — empty greenfield → the exact 404/400 path
-		// (raw-domain happy path fails loud, billing-list precedent). Perms + messages are
-		// per the admin controllers (oracle-probed).
+		// (raw-domain happy path fails loud, billing-list precedent). Perms + messages
+		// match the admin endpoints (oracle-probed).
 		r.Get("/project/{id}", h.rawByID("admin:project:read", "project", "id",
 			func(id string) *httpx.HTTPError {
 				return httpx.NotFound(fmt.Sprintf("The project with id %s was not found. ", id))
@@ -196,20 +195,20 @@ func (h *Handler) Routes(r chi.Router) {
 			}))
 		r.Get("/price-plan/rule/{id}", h.rawByID("admin:price_plan:read", "pricePlanRule", "id",
 			func(string) *httpx.HTTPError { return httpx.NotFound("PricePlanRule not found. ") }))
-		// OrganizationAdminController by-billing-profile / by-member (empty greenfield → []).
+		// Organization by-billing-profile / by-member (empty greenfield → []).
 		r.Get("/organizations/by-billing-profile/{billingProfileId}", h.orgsByBillingProfile)
 		r.Get("/organizations/by-member/{sub}", h.orgsByMember)
-		// ProjectAdminController by-user / by-organization / by-billing-profile / external-services
+		// Project by-user / by-organization / by-billing-profile / external-services
 		// (empty → []). `external-services` is a STATIC sibling of the {id} param (no chi conflict).
 		r.Get("/project/by-user", h.projectsByUser)
 		r.Get("/project/by-organization", h.projectsByOrganization)
 		r.Get("/project/{billingProfileId}/billing-profile", h.projectsByBillingProfile)
 		r.Get("/project/external-services/{externalServiceId}", h.projectsByExternalService)
-		// BillingConfigurationAdminController reads (the seeded default config; fixture on both datastores).
+		// Billing-configuration reads (the seeded default config; fixture on both datastores).
 		r.Get("/billing/configuration", h.billingConfigList)
 		r.Get("/billing/configuration/current", h.billingConfigCurrent)
 		r.Get("/billing/configuration/{id}", h.billingConfigByID)
-		// ExternalServiceAdminController reads (base path /admin/service). Empty greenfield → []/404;
+		// External-service reads (base path /admin/service). Empty greenfield → []/404;
 		// the cloud/openstack/services list is a static deterministic set.
 		r.Get("/service", h.serviceList)
 		r.Get("/service/cloud/openstack/services", h.openstackServices)
@@ -223,7 +222,7 @@ func (h *Handler) Routes(r chi.Router) {
 		// VHI placement-quotas stays an empty stub (VHI = Virtuozzo-specific external API; the dev
 		// region is plain OpenStack, no VHI traits → renders empty).
 		r.Get("/service/{id}/vhi/placement-quotas", h.emptyCloudList("admin:service:read"))
-		// InitAdminController.adminInit — gated (any admin, no specific permission); branding from the
+		// Admin init — gated (any admin, no specific permission); branding from the
 		// seeded platformConfiguration + REMOTE_OIDC strategies.
 		r.Get("/init", h.adminInit)
 		// Admin dashboard landing reads (the FE queries these on load). Bare lists are raw-domain
@@ -235,7 +234,7 @@ func (h *Handler) Routes(r chi.Router) {
 		r.Get("/user", h.listRaw("admin:user:read", "users"))
 		r.Get("/billing-profile", h.billingProfileAdminList)
 		r.Get("/bill", h.billAdminList)
-		// CloudResourceAdminController bare list = single(list) (NO paging, unlike the others).
+		// Cloud-resource bare list = a bare {data:[...]} (NO paging, unlike the others).
 		r.Get("/cloud-resource", h.cloudResourcesAll)
 		// Remaining admin-menu bare lists (raw-domain passthrough; empty/seeded under greenfield).
 		r.Get("/admin-permissions", h.listRaw("admin:permission:read", "adminPermission"))
@@ -243,16 +242,16 @@ func (h *Handler) Routes(r chi.Router) {
 		r.Get("/pdf-templates", h.listRaw("admin:message_template:read", "pdfTemplate"))
 		r.Get("/savings-plans", h.listRaw("admin:savings_plan:read", "savingsPlan"))
 		r.Get("/savings-contracts", h.listRaw("admin:savings_plan:read", "savingsContract"))
-		// ThirdPartyIntegrationAdminController reads (stats = static catalog; by-id/type/category).
+		// Third-party integration reads (stats = static catalog; by-id/type/category).
 		r.Get("/integrations/stats", h.integrationStats)
 		r.Get("/integrations/type/{type}", h.integrationsByType)
 		r.Get("/integrations/category/{category}", h.integrationsByCategory)
 		r.Get("/integrations/{id}", h.integrationByID)
-		// PlatformConfigurationAdminController reads (the seeded default config; fixture on both datastores).
+		// Platform-configuration reads (the seeded default config; fixture on both datastores).
 		r.Get("/platform-configuration", h.platformConfigList)
 		h.routePlatformConfigMut(r) // POST / PUT/{id} / DELETE/{id} / PUT/{id}/regions
 		r.Get("/platform-configuration/current", h.platformConfigCurrent)
-		// PlatformConfigurationAdminController.getLoginConfiguration — static sibling of {id}; MUST be
+		// The login configuration — static sibling of {id}; MUST be
 		// registered (else it falls into platformConfigByID → always-500). REMOTE_OIDC greenfield:
 		// no oauth2 login clients, localIdp off.
 		r.Get("/platform-configuration/login-config", h.platformLoginConfig)
@@ -288,7 +287,7 @@ func (h *Handler) Routes(r chi.Router) {
 		h.routeUser(r)
 		h.routeUserManagement(r)
 		// Onboarding MUTATIONS (platform/billing-configuration, initialize-user) are intentionally
-		// NOT registered: the public first-run wizard is a Java-parity relic with no consumer here
+		// NOT registered: the public first-run wizard has no consumer here
 		// (Stratos is REMOTE_OIDC-only so there is no first-local-admin to bootstrap, config is
 		// applied by deploy/seed, and the FE never calls it). Removing the routes closes the
 		// unauthenticated setup-tampering surface entirely. The status GET stays (registered above).
@@ -307,14 +306,14 @@ func (h *Handler) Routes(r chi.Router) {
 	})
 }
 
-// adminCountries handles getCountries: the static country list.
+// adminCountries returns the static country list.
 // PUBLIC — the security configuration permits this path (mirrored in pkg/auth publicExact),
 // so there is no admin gate (no token/rc on this request).
 func (h *Handler) adminCountries(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, billing.Countries())
 }
 
-// adminCurrencies handles getCurrencies: the currency list
+// adminCurrencies returns the currency list
 // (deduped by currencyCode). PUBLIC — whitelisted in pkg/auth (no admin gate). Drives the
 // Base Currency dropdown on the billing-configuration Settings tab.
 func (h *Handler) adminCurrencies(w http.ResponseWriter, r *http.Request) {
@@ -405,7 +404,7 @@ func (h *Handler) creditCardTxnByID(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, billing.CreditCardTransactionToDto(txn))
 }
 
-// taxList handles getAllTaxRates (gated ADMIN_TAX_READ). The pricing.TaxRate
+// taxList returns all tax rates (gated ADMIN_TAX_READ). The pricing.TaxRate
 // json shape carries whole-percent levels and dates (nulls omitted).
 func (h *Handler) taxList(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:tax:read") {
@@ -421,7 +420,7 @@ func (h *Handler) taxList(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, rates)
 }
 
-// taxByID handles getTaxRate (gated ADMIN_TAX_READ): the single rate, or 404.
+// taxByID returns a single tax rate (gated ADMIN_TAX_READ), or 404.
 func (h *Handler) taxByID(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:tax:read") {
 		return
@@ -440,7 +439,7 @@ func (h *Handler) taxByID(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteError(w, httpx.NotFound("Tax rate not found"))
 }
 
-// permissions handles listPermissions: the full Permission metadata set.
+// permissions returns the full Permission metadata set.
 func (h *Handler) permissions(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:role:read") {
 		return
@@ -448,7 +447,7 @@ func (h *Handler) permissions(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, rbac.AllPermissionMeta())
 }
 
-// refundTransaction handles refundTransaction:
+// refundTransaction handles
 // POST /api/v1/admin/account-credit-transactions/refund/{id}, gated ADMIN_TRANSACTION_MANAGE. Full-
 // refunds a SUCCESS deposit's PaymentIntent and voids its AccountCredit (→ REFUNDED).
 func (h *Handler) refundTransaction(w http.ResponseWriter, r *http.Request) {
@@ -466,8 +465,8 @@ func (h *Handler) refundTransaction(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, billing.AccountCreditTransactionToDto(txn))
 }
 
-// adminContext resolves the caller's admin role + granted permission patterns (the
-// AdminRequestContext build). ok=false → not an admin (→ 403).
+// adminContext resolves the caller's admin role + granted permission patterns.
+// ok=false → not an admin (→ 403).
 func (h *Handler) adminContext(r *http.Request) (role string, granted []string, ok bool) {
 	rc := httpx.RC(r.Context())
 	if h.adminIssuer != "" {
@@ -510,7 +509,7 @@ type AdminProfileDto struct {
 	Permissions []string `json:"permissions"`
 }
 
-// me handles getAdminProfile: the caller's sub/role + expanded permission keys
+// me returns the caller's admin profile: sub/role + expanded permission keys
 // (+ the User's email/names when a User doc exists; omitted otherwise, e.g. the master admin).
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 	role, granted, ok := h.adminContext(r)
@@ -546,7 +545,7 @@ func (h *Handler) listRaw(key, collection string) http.HandlerFunc {
 	}
 }
 
-// AdminRoleDto is the listRoles element: id==name for a
+// AdminRoleDto is a role element in the roles list: id==name for a
 // built-in role, its granted patterns, the expanded key set, and builtIn=true.
 type AdminRoleDto struct {
 	ID                  string   `json:"id"`
@@ -556,7 +555,7 @@ type AdminRoleDto struct {
 	BuiltIn             bool     `json:"builtIn"`
 }
 
-// adminRoles handles listRoles (ADMIN_ROLE_READ): the 5 built-in roles PLUS
+// adminRoles returns the roles (ADMIN_ROLE_READ): the 5 built-in roles PLUS
 // the custom roles persisted in the `adminRole` collection (created via POST /admin-roles from the
 // admin UI). Both are emitted as customAdminRoleDto (a superset of AdminRoleDto's fields).
 func (h *Handler) adminRoles(w http.ResponseWriter, r *http.Request) {
@@ -581,7 +580,7 @@ func (h *Handler) adminRoles(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, roles)
 }
 
-// externalResourceProviders handles getExternalResourceProviders
+// externalResourceProviders lists the external resource providers
 // (ADMIN_SERVICE_READ): all providers, or filtered by ?externalServiceId (empty → []).
 func (h *Handler) externalResourceProviders(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:service:read") {
@@ -603,7 +602,7 @@ type OnboardingStatusResponse struct {
 	LocalAdminNeedsInitialization bool   `json:"localAdminNeedsInitialization"`
 }
 
-// onboardingStatus handles getStatus — PUBLIC (no admin gate; whitelisted).
+// onboardingStatus reports the onboarding status — PUBLIC (no admin gate; whitelisted).
 // fullyOnboarded = platformConfigExists && billingConfigExists && !localAdminNeedsInitialization →
 // 404 "Onboarding already completed". Greenfield is REMOTE_OIDC, so
 // localAdminNeedsInitialization is always false (the LOCAL_IDP no-user/no-admin bootstrap N/A).
@@ -647,7 +646,7 @@ func (h *Handler) rawByID(perm, collection, idParam string, errFn func(id string
 
 // shapeIntegration maps a thirdPartyIntegration doc to the ThirdPartyIntegrationDto shape: `_id`→`id`
 // and DROP the encrypted `secret` — credentials (SMTP password / API keys) must NEVER reach the
-// browser (ThirdPartyIntegrationDto.toDto sets secret=null) — plus the legacy `_class`. config /
+// browser — plus the legacy `_class`. config /
 // metadata / name / description / thirdParty pass through.
 func shapeIntegration(d pgdoc.M) pgdoc.M {
 	if d == nil {
@@ -699,9 +698,9 @@ func (h *Handler) integrationsList(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, items)
 }
 
-// integrationStats handles getThirdPartyStats: the static
-// integration catalog, each entry's `installed` = existsByThirdParty(name) (so a configured SMTP/
-// Stripe/etc. shows as installed and the dashboard's setup checklist marks it done).
+// integrationStats returns the static
+// integration catalog, each entry's `installed` = whether an integration with that name exists (so a
+// configured SMTP/Stripe/etc. shows as installed and the dashboard's setup checklist marks it done).
 // ADMIN_INTEGRATION_READ.
 func (h *Handler) integrationStats(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:integration:read") {
@@ -713,13 +712,13 @@ func (h *Handler) integrationStats(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]ThirdPartyStats, len(ThirdPartyCatalog))
 	for i, e := range ThirdPartyCatalog {
-		e.Installed = installed[e.Name] // existsByThirdParty(name)
+		e.Installed = installed[e.Name] // whether an integration with that name exists
 		out[i] = e
 	}
 	httpx.List(w, out)
 }
 
-// integrationsByType handles getThirdPartyIntegrations(type) — installed integrations of a type
+// integrationsByType lists installed integrations of a given type
 // (secret stripped); ADMIN_INTEGRATION_READ.
 func (h *Handler) integrationsByType(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:integration:read") {
@@ -735,7 +734,7 @@ func (h *Handler) integrationsByType(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, items)
 }
 
-// integrationsByCategory handles listIntegrationsByCategory: the category → the catalog entries in it
+// integrationsByCategory lists integrations by category: the category → the catalog entries in it
 // (by name) → the installed integrations whose `thirdParty` is one of those names. The
 // thirdPartyIntegration doc has NO `categories` field — the category lives in the catalog — so we map
 // category → names → docs. Secret stripped. ADMIN_INTEGRATION_READ.
@@ -787,7 +786,7 @@ func (h *Handler) integrationByID(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, shapeIntegration(doc))
 }
 
-// platformConfigList handles listConfigurations (ADMIN_PLATFORM_CONFIG_READ).
+// platformConfigList lists the platform configurations (ADMIN_PLATFORM_CONFIG_READ).
 func (h *Handler) platformConfigList(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:platform_config:read") {
 		return
@@ -799,8 +798,8 @@ func (h *Handler) platformConfigList(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, cfgs)
 }
 
-// platformConfigCurrent handles getCurrentConfiguration: the seeded default config (the create branch
-// never runs in the seeded env); ADMIN_PLATFORM_CONFIG_READ.
+// platformConfigCurrent returns the current platform configuration: the seeded default config (the
+// create branch never runs in the seeded env); ADMIN_PLATFORM_CONFIG_READ.
 func (h *Handler) platformConfigCurrent(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:platform_config:read") {
 		return
@@ -827,7 +826,7 @@ type PlatformLoginConfigInfo struct {
 	BaseRedirectURL    string `json:"baseRedirectUrl,omitempty"`
 }
 
-// platformLoginConfig handles getLoginConfiguration: the platform
+// platformLoginConfig returns the platform
 // login configuration (the social/SSO oauth2 login clients + auth strategies). REMOTE_OIDC greenfield
 // has no registered oauth2 login clients → empty list, localIdp off. (ADMIN_PLATFORM_CONFIG_READ.)
 func (h *Handler) platformLoginConfig(w http.ResponseWriter, r *http.Request) {
@@ -842,17 +841,17 @@ func (h *Handler) platformLoginConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// platformConfigByID handles getConfiguration(id): a missing id throws a plain runtime error →
-// mapped to HTTP 500 "No configuration found with id %s" (replicated exactly; happy-path
+// platformConfigByID returns a platform configuration by id: a missing id yields
+// HTTP 500 "No configuration found with id %s" (happy-path
 // by-id deferred — the seeded id is masked anyway); ADMIN_PLATFORM_CONFIG_READ.
 func (h *Handler) platformConfigByID(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:platform_config:read") {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	// getConfiguration(id) = findById(id).orElseThrow: return the config for a VALID id, 500
-	// only when absent. (Was a broken stub that ALWAYS 500'd — even for the real id — so the admin
-	// config edit page's record-fetch / post-save refresh failed → the save never showed.)
+	// Return the config for a VALID id, 500 only when absent. (Was a broken stub that ALWAYS 500'd —
+	// even for the real id — so the admin config edit page's record-fetch / post-save refresh failed →
+	// the save never showed.)
 	cfg, err := h.platformcfg.ByIDAdminConfiguration(r.Context(), id)
 	if httpx.WriteError(w, err) {
 		return
@@ -928,7 +927,7 @@ type OpenstackAuthResponse struct {
 	Roles               []string `json:"roles"`
 }
 
-// emptyCloudList builds a gated handler returning an empty single(list) {data:[]} — STUBS the
+// emptyCloudList builds a gated handler returning an empty {data:[]} — STUBS the
 // ExternalService/cloud live-read endpoints (os-images, volume/types, share/protocols,
 // availability-zones, vhi/placement-quotas, public-networks) so the cloud-provider config page
 // renders. Live OpenStack listing = cloud-admin (the CloudClient is wired for /debug/cloud).
@@ -941,7 +940,7 @@ func (h *Handler) emptyCloudList(perm string) http.HandlerFunc {
 	}
 }
 
-// openstackServices handles listOpenstackServices: the static set.
+// openstackServices returns the static set of OpenStack services.
 func (h *Handler) openstackServices(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:service:read") {
 		return
@@ -949,7 +948,7 @@ func (h *Handler) openstackServices(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, OpenstackServiceTypes)
 }
 
-// projectServices handles getProjectExternalServices: resolves the
+// projectServices lists a project's external services: resolves the
 // project first → 404 "The project with id %s was not found. " when absent (happy-path deferred).
 func (h *Handler) projectServices(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:service:read") {
@@ -967,8 +966,8 @@ func (h *Handler) projectServices(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, []any{})
 }
 
-// userServices handles getUserExternalServices → getUser(userId):
-// resolves the user by ID (id-aware, like getById) → 404 "User with id %s not found " when
+// userServices lists a user's external services:
+// resolves the user by ID → 404 "User with id %s not found " when
 // absent (happy-path list deferred → empty).
 func (h *Handler) userServices(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:service:read") {
@@ -998,7 +997,7 @@ type AdminInitializer struct {
 	LocalIdpEnabled    bool   `json:"localIdpEnabled"`
 }
 
-// adminInit handles adminInit: branding from the default platformConfiguration +
+// adminInit returns the admin init payload: branding from the default platformConfiguration +
 // the auth strategies. Gated to any admin (no specific permission; non-admin → 403, no-token → 401
 // from the RS filter). Greenfield is REMOTE_OIDC → localIdpEnabled false, localIdpAccountConsoleUrl nil.
 func (h *Handler) adminInit(w http.ResponseWriter, r *http.Request) {
@@ -1016,7 +1015,7 @@ func (h *Handler) adminInit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// orgsByBillingProfile handles listOrganizationsByBillingProfile.
+// orgsByBillingProfile lists organizations for a billing profile.
 func (h *Handler) orgsByBillingProfile(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:organization:read") {
 		return
@@ -1028,7 +1027,7 @@ func (h *Handler) orgsByBillingProfile(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, items)
 }
 
-// orgsByMember handles listOrganizationsByMember.
+// orgsByMember lists organizations a user is a member of.
 func (h *Handler) orgsByMember(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:organization:read") {
 		return
@@ -1040,7 +1039,7 @@ func (h *Handler) orgsByMember(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, items)
 }
 
-// projectsByUser handles listProjectsByUser (required ?sub).
+// projectsByUser lists a user's projects (required ?sub).
 func (h *Handler) projectsByUser(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:project:read") {
 		return
@@ -1053,7 +1052,7 @@ func (h *Handler) projectsByUser(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, items)
 }
 
-// projectsByOrganization handles listByOrganization (required ?organizationId).
+// projectsByOrganization lists an organization's projects (required ?organizationId).
 func (h *Handler) projectsByOrganization(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:project:read") {
 		return
@@ -1065,7 +1064,7 @@ func (h *Handler) projectsByOrganization(w http.ResponseWriter, r *http.Request)
 	httpx.List(w, items)
 }
 
-// projectsByBillingProfile handles listByBillingProfile.
+// projectsByBillingProfile lists projects for a billing profile.
 func (h *Handler) projectsByBillingProfile(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:project:read") {
 		return
@@ -1077,10 +1076,9 @@ func (h *Handler) projectsByBillingProfile(w http.ResponseWriter, r *http.Reques
 	httpx.List(w, items)
 }
 
-// projectsByExternalService handles listExternalServices
+// projectsByExternalService lists projects for an external service
 // (GET /api/v1/admin/project/external-services/{externalServiceId}): the projects whose services
-// include the external service id (listByExternalServiceId = match
-// services.serviceId). Empty under greenfield → []. Gated ADMIN_PROJECT_READ.
+// include the external service id. Empty under greenfield → []. Gated ADMIN_PROJECT_READ.
 func (h *Handler) projectsByExternalService(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:project:read") {
 		return
@@ -1093,7 +1091,7 @@ func (h *Handler) projectsByExternalService(w http.ResponseWriter, r *http.Reque
 	httpx.List(w, items)
 }
 
-// auditList handles listAuditEvents: the global cursor-paginated audit log
+// auditList returns the global cursor-paginated audit log
 // (all request interfaces, unlike the org/account-scoped readers). Gated ADMIN_AUDIT_READ.
 // Filters: requestInterface/organizationId/resourceType/actorId/action/outcome/from/to/search;
 // the projectId/resourceId/eventContext filters are not yet modeled in
@@ -1136,7 +1134,7 @@ func (h *Handler) billingConfigList(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, cfgs)
 }
 
-// billingConfigCurrent handles getCurrentConfiguration: the
+// billingConfigCurrent returns the current billing configuration: the
 // existing default config (billing IS created in the seeded env, so never the create branch).
 func (h *Handler) billingConfigCurrent(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:billing_config:read") {
@@ -1153,7 +1151,7 @@ func (h *Handler) billingConfigCurrent(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, cfg)
 }
 
-// billingConfigByID handles getConfiguration: getById → the
+// billingConfigByID returns a billing configuration by id → the
 // config, or 400 "Billing configuration not found " (trailing space) when absent.
 func (h *Handler) billingConfigByID(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:billing_config:read") {
@@ -1170,8 +1168,8 @@ func (h *Handler) billingConfigByID(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, cfg)
 }
 
-// availablePermissions handles listAvailablePermissions:
-// the full AdminPermissionEnum {key,description} metadata (gated ADMIN_PERMISSION_READ).
+// availablePermissions returns
+// the full admin-permission {key,description} metadata (gated ADMIN_PERMISSION_READ).
 func (h *Handler) availablePermissions(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:permission:read") {
 		return
@@ -1179,8 +1177,8 @@ func (h *Handler) availablePermissions(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, AdminPermissionMeta)
 }
 
-// bankTransferList handles listBankTransfers (ADMIN_TRANSACTION_READ):
-// the bank transfers for an integration (required ?integrationId), createdAt DESC.
+// bankTransferList lists bank transfers (ADMIN_TRANSACTION_READ):
+// the bank transfers for an integration (required ?integrationId), newest first.
 func (h *Handler) bankTransferList(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:transaction:read") {
 		return
@@ -1192,7 +1190,7 @@ func (h *Handler) bankTransferList(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, items)
 }
 
-// bankTransferByID handles getBankTransfer (ADMIN_TRANSACTION_READ):
+// bankTransferByID returns a bank transfer (ADMIN_TRANSACTION_READ):
 // the bank transfer, or 404 "Bank transfer %s not found " (trailing space, interpolated).
 func (h *Handler) bankTransferByID(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:transaction:read") {
@@ -1210,17 +1208,16 @@ func (h *Handler) bankTransferByID(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, bt)
 }
 
-// cloudResourcesAll handles getCloudResources: the aggregated cloud
-// resources as single(list) — a bare {data:[...]} with NO paging (unlike the
-// other admin lists). Empty under greenfield → {data:[]}; the $lookup-aggregated DTO is deferred.
+// cloudResourcesAll returns all cloud resources: each joined to its
+// project — a bare {data:[...]} with NO paging (unlike the
+// other admin lists). Empty under greenfield → {data:[]}; the joined DTO is deferred.
 func (h *Handler) cloudResourcesAll(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:cloud_resource:read") {
 		return
 	}
-	// listCloudResources: sort _id DESC, $lookup the project (matched by
-	// id) projected to {id,name}, UNWIND (drops resources with no matching project), then a
-	// reduced projection. Build the same shape: {id,data,createdAt,externalId,info,region,type,
-	// serviceId,project:{id,name}}.
+	// Newest first (sort _id DESC), join each resource to its project (matched by id, keeping
+	// {id,name}), drop resources with no matching project, then reduce. Build the shape:
+	// {id,data,createdAt,externalId,info,region,type,serviceId,project:{id,name}}.
 	resources, err := h.repo.ListRawSorted(r.Context(), "cloudResource", "_id", -1)
 	if httpx.WriteError(w, err) {
 		return
@@ -1229,14 +1226,14 @@ func (h *Handler) cloudResourcesAll(w http.ResponseWriter, r *http.Request) {
 	for _, cr := range resources {
 		projID, _ := cr["projectId"].(string)
 		if projID == "" {
-			continue // unwind drops resources without a project
+			continue // drop resources without a project
 		}
 		proj, err := h.repo.FindByIDRaw(r.Context(), "project", projID)
 		if httpx.WriteError(w, err) {
 			return
 		}
 		if proj == nil {
-			continue // unwind drops the unmatched
+			continue // drop the unmatched
 		}
 		sd, _ := shapeDeep(cr).(pgdoc.M)
 		keep := pgdoc.M{}
@@ -1251,8 +1248,8 @@ func (h *Handler) cloudResourcesAll(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, out)
 }
 
-// cloudResourceByID handles getCloudResource (ADMIN_CLOUD_RESOURCE_READ):
-// findById → single; a missing id yields an empty {} envelope (single(null)), NOT a 404.
+// cloudResourceByID returns a cloud resource by id (ADMIN_CLOUD_RESOURCE_READ):
+// a missing id yields an empty {} envelope, NOT a 404.
 func (h *Handler) cloudResourceByID(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:cloud_resource:read") {
 		return
@@ -1268,7 +1265,7 @@ func (h *Handler) cloudResourceByID(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, res)
 }
 
-// cloudResourcesByUser handles listCloudResourcesByUserId.
+// cloudResourcesByUser lists a user's cloud resources.
 func (h *Handler) cloudResourcesByUser(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:cloud_resource:read") {
 		return
@@ -1280,7 +1277,7 @@ func (h *Handler) cloudResourcesByUser(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, res)
 }
 
-// cloudResourcesByProject handles listCloudResourcesByProjectId.
+// cloudResourcesByProject lists a project's cloud resources.
 func (h *Handler) cloudResourcesByProject(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:cloud_resource:read") {
 		return
@@ -1292,8 +1289,8 @@ func (h *Handler) cloudResourcesByProject(w http.ResponseWriter, r *http.Request
 	httpx.List(w, res)
 }
 
-// suspensionsByBP handles listByBillingProfileId (ADMIN_SUSPENSION_READ):
-// the suspension processes for a billing profile (empty under greenfield → {data:[],paging}).
+// suspensionsByBP lists the suspension processes for a billing profile
+// (ADMIN_SUSPENSION_READ; empty under greenfield → {data:[],paging}).
 func (h *Handler) suspensionsByBP(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:suspension:read") {
 		return
@@ -1305,8 +1302,8 @@ func (h *Handler) suspensionsByBP(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, procs)
 }
 
-// flavorCategories handles getAllFlavorCategories (admin list,
-// gated ADMIN_FLAVOR_CATEGORY_MANAGE). Empty under the greenfield seed.
+// flavorCategories returns the admin flavor-category list
+// (gated ADMIN_FLAVOR_CATEGORY_MANAGE). Empty under the greenfield seed.
 func (h *Handler) flavorCategories(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:flavor_category:manage") {
 		return

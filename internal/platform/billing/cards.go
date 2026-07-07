@@ -121,14 +121,14 @@ func (r *Repo) CreditCardByID(ctx context.Context, id string) (*CreditCard, erro
 }
 
 // DeleteCreditCard removes a stored card scoped to its billing profile
-// (findByBillingProfileIdAndId → delete; no-op if absent).
+// (matched by billing-profile id and card id; no-op if absent).
 func (r *Repo) DeleteCreditCard(ctx context.Context, bpID, id string) error {
 	_, err := r.cards.DeleteOne(ctx, pgdoc.M{"_id": id, "billingProfileId": bpID})
 	return err
 }
 
 // CreditCardByIDAndBillingProfile loads a card scoped to its profile
-// (findFirstByIdAndBillingProfileId, used by setDefaultCard). nil if absent.
+// (matched by id and billing-profile id, used when setting the default card). nil if absent.
 func (r *Repo) CreditCardByIDAndBillingProfile(ctx context.Context, id, bpID string) (*CreditCard, error) {
 	var c CreditCard
 	found, err := r.cards.FindOne(ctx, pgdoc.M{"_id": id, "billingProfileId": bpID}, &c)
@@ -139,7 +139,7 @@ func (r *Repo) CreditCardByIDAndBillingProfile(ctx context.Context, id, bpID str
 }
 
 // CreditCardTransactionByIDAndBillingProfile loads a card transaction scoped to its profile
-// (getByIdAndBillingProfileId). nil if absent.
+// (matched by id and billing-profile id). nil if absent.
 func (r *Repo) CreditCardTransactionByIDAndBillingProfile(ctx context.Context, id, bpID string) (*CreditCardTransaction, error) {
 	var t CreditCardTransaction
 	found, err := r.cardTxns.FindOne(ctx, pgdoc.M{"_id": id, "billingProfileId": bpID}, &t)

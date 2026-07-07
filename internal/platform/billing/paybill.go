@@ -20,8 +20,8 @@ type PayService struct {
 	reviewer ProfileReviewer
 }
 
-// ProfileReviewer re-evaluates a profile's suspension after its balance changes
-// (suspensionService.reviewBillingProfile). *SuspensionJob implements it.
+// ProfileReviewer re-evaluates a profile's suspension after its balance changes.
+// *SuspensionJob implements it.
 type ProfileReviewer interface {
 	ReviewBillingProfile(ctx context.Context, profile *BillingProfile) error
 }
@@ -57,7 +57,7 @@ func (s *PayService) PayBillWithCredits(ctx context.Context, profile *BillingPro
 	if bill == nil {
 		return nil, ErrBillNotFound
 	}
-	// Owner guard (mirrors billByID's bill.BillingProfileID != bp.ID): a bill of another profile
+	// Owner guard (mirrors the by-id lookup's owner check): a bill of another profile
 	// must be invisible on the pay path, else a member of profile A could settle profile B's bill.
 	if !billBelongsToProfile(bill, profile.ID) {
 		return nil, ErrBillNotFound
@@ -81,7 +81,7 @@ func (s *PayService) PayBillWithCredits(ctx context.Context, profile *BillingPro
 		return nil, err
 	}
 
-	// unpaid in product currency (exchangeToProductCurrency(unpaidProductCcy, invoiceCcy)).
+	// unpaid amount converted into the product currency.
 	unpaid, err := x.ExchangeToProductCurrency(pricing.GetUnpaidAmountBillProductCurrency(bill), bill.InvoiceCurrency, baseCurrency, now)
 	if err != nil {
 		return nil, err
@@ -148,8 +148,8 @@ func (s *PayService) PayBillWithCredits(ctx context.Context, profile *BillingPro
 	return bill, nil
 }
 
-// billBelongsToProfile is the pay-path owner guard (mirrors billByID): a bill of another profile
-// is invisible → ErrBillNotFound, so a member of one profile can't settle another profile's bill.
+// billBelongsToProfile is the pay-path owner guard (mirrors the by-id lookup): a bill of another
+// profile is invisible → ErrBillNotFound, so a member of one profile can't settle another's bill.
 func billBelongsToProfile(bill *pricing.Bill, profileID string) bool {
 	return bill != nil && bill.BillingProfileID == profileID
 }

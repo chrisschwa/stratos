@@ -107,12 +107,11 @@ func firstOfMonth(now time.Time, addMonths int) time.Time {
 }
 
 // SavingsService handles the cron-driven parts of the savings-contract service. It covers the
-// pure state transition (expireContracts); the notification downstream it also fires —
-// reminderNotificationService.cancelReminders + notificationService.sendContractExpiredEmail
-// — belongs to the ReminderNotification / email subsystems, which are NOT wired (gated like
-// the other notification jobs), so it is intentionally skipped here. The contract status
-// flip is the persisted, billing-relevant effect (listAvailableContractsByBillingProfileId
-// only counts ACTIVE contracts).
+// pure state transition (expiring contracts); the notification downstream it also fires —
+// cancelling pending reminders + sending the contract-expired email — belongs to the
+// reminder / email subsystems, which are NOT wired (gated like the other notification jobs),
+// so it is intentionally skipped here. The contract status flip is the persisted,
+// billing-relevant effect (only ACTIVE contracts count toward a profile's available contracts).
 type SavingsService struct {
 	repo     *Repo
 	now      func() time.Time

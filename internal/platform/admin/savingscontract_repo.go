@@ -13,17 +13,17 @@ import (
 // the decimal tier compares are faithful, the active-duplicate check, and the two list reads
 // incl. the billingProfile join).
 
-// savingsContractFindBillingProfile loads a billing profile by id (findById)
+// savingsContractFindBillingProfile loads a billing profile by id
 // (the create flow only needs the profile's existence + id, both already the path param). Returns
 // the raw doc (nil when absent → 404 at the handler).
 func (r *Repo) savingsContractFindBillingProfile(ctx context.Context, id string) (pgdoc.M, error) {
 	return r.FindDoc(ctx, "billingProfile", id)
 }
 
-// savingsContractAvailablePlan loads the available savings plan =
-// findByIdAndAvailable(id, true). Returns nil when the plan is absent OR not available (the
-// query filters on available==true, so a non-available plan is "not found"). Ids are plain
-// strings, so a single {_id, available} filter covers it.
+// savingsContractAvailablePlan loads a savings plan only when it's marked available.
+// Returns nil when the plan is absent OR not available (the query filters on available==true, so a
+// non-available plan is "not found"). Ids are plain strings, so a single {_id, available} filter
+// covers it.
 func (r *Repo) savingsContractAvailablePlan(ctx context.Context, id string) (*billing.SavingsPlan, error) {
 	if id == "" {
 		return nil, nil
@@ -36,8 +36,8 @@ func (r *Repo) savingsContractAvailablePlan(ctx context.Context, id string) (*bi
 	return &plan, nil
 }
 
-// savingsContractActiveExists checks existence:
-// existsBySavingsPlanIdAndBillingProfileIdAndStatus(planId, bpId, ACTIVE).
+// savingsContractActiveExists reports whether an ACTIVE contract already exists for the given
+// (savingsPlanId, billingProfileId) pair.
 func (r *Repo) savingsContractActiveExists(ctx context.Context, savingsPlanID, billingProfileID string) (bool, error) {
 	return r.c(savingsContractCollection).Exists(ctx, pgdoc.M{
 		"savingsPlanId":    savingsPlanID,
@@ -46,7 +46,7 @@ func (r *Repo) savingsContractActiveExists(ctx context.Context, savingsPlanID, b
 	})
 }
 
-// savingsContractsByBillingProfile loads contracts by billing profile (findByBillingProfileId): the raw
+// savingsContractsByBillingProfile loads the contracts for a billing profile: the raw
 // SavingsContract docs (still carrying `_id`; the handler shapeDoc's each). Never nil.
 func (r *Repo) savingsContractsByBillingProfile(ctx context.Context, billingProfileID string) ([]pgdoc.M, error) {
 	out := []pgdoc.M{}
@@ -56,12 +56,11 @@ func (r *Repo) savingsContractsByBillingProfile(ctx context.Context, billingProf
 	return out, nil
 }
 
-// savingsContractsBySavingsPlanWithBillingProfile runs
-// getBySavingsPlanIdWithBillingProfile: the join that matches a savingsPlanId, embeds the
-// billingProfile (savingsContract.billingProfileId → billingProfile id column), and sorts
-// createdAt DESC. Returns raw docs (each carrying `_id` + the embedded `billingProfile`; a
-// contract with no matching profile keeps NO billingProfile field — like $arrayElemAt on an
-// empty $lookup result); the handler shapeDoc's the top-level doc.
+// savingsContractsBySavingsPlanWithBillingProfile returns the contracts for a savings plan joined to
+// their billing profile: it matches a savingsPlanId, embeds the billingProfile
+// (savingsContract.billingProfileId → billingProfile id column), and sorts newest first.
+// Returns raw docs (each carrying `_id` + the embedded `billingProfile`; a contract with no matching
+// profile keeps NO billingProfile field); the handler shapeDoc's the top-level doc.
 func (r *Repo) savingsContractsBySavingsPlanWithBillingProfile(ctx context.Context, savingsPlanID string) ([]pgdoc.M, error) {
 	// Raw SQL bypasses the Store's implicit table auto-create; on a fresh DB either
 	// table may not exist yet (42P01), so Ensure both first (cheap, idempotent).

@@ -88,7 +88,7 @@ func (req flavorCategoryReq) doc() pgdoc.M {
 	return d
 }
 
-// flavorCategoryCreate handles createFlavorCategory: save → single(saved). No validation.
+// flavorCategoryCreate creates a flavor category: persist it and return the saved doc. No validation.
 func (h *Handler) flavorCategoryCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, flavorCategoryPerm) {
 		return
@@ -106,9 +106,9 @@ func (h *Handler) flavorCategoryCreate(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, shapeDoc(saved))
 }
 
-// flavorCategoryUpdate handles updateFlavorCategory: get-or-404 → overwrite the 7 mutable fields →
+// flavorCategoryUpdate updates a flavor category: get-or-404 → overwrite the 7 mutable fields →
 // bare-metal collision guard (a flavor name must not live in both a bare-metal and a non-bare-metal
-// category) → save → single.
+// category) → save → return the saved doc.
 func (h *Handler) flavorCategoryUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, flavorCategoryPerm) {
 		return
@@ -128,7 +128,7 @@ func (h *Handler) flavorCategoryUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := maps.Clone(existing)
-	// Bare-metal collision guard (updateFlavorCategory): for each flavor in the
+	// Bare-metal collision guard: for each flavor in the
 	// new set, the opposite-bareMetal flag must NOT already contain it in another category.
 	for _, f := range req.Flavors {
 		fm, _ := f.(map[string]any)
@@ -158,14 +158,14 @@ func (h *Handler) flavorCategoryUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.ReplaceDoc(r.Context(), flavorCategoryCollection, id, existing); httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE audit: field-level diff (middleware computes diffSnapshots(before, after)).
+	// UPDATE audit: record the before/after snapshots; the middleware emits the field-level diff.
 	after, _ := h.repo.FindDoc(r.Context(), flavorCategoryCollection, id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// flavorNameInCategory checks isBareMetalFlagAndContainsFlavorAndExcludeCategoryId: any other
-// category with the given bareMetal flag that lists this flavor name.
+// flavorNameInCategory reports whether any other
+// category with the given bareMetal flag lists this flavor name.
 func (h *Handler) flavorNameInCategory(ctx context.Context, bareMetal bool, flavorName, excludeID string) (bool, error) {
 	filter := pgdoc.M{
 		"bareMetal": bareMetal,
@@ -176,7 +176,7 @@ func (h *Handler) flavorNameInCategory(ctx context.Context, bareMetal bool, flav
 	return n > 0, err
 }
 
-// flavorCategoryDelete handles deleteFlavorCategory: get-or-404 → deleteById + audit → 204 No Content.
+// flavorCategoryDelete deletes a flavor category: get-or-404 → delete by id + audit → 204 No Content.
 func (h *Handler) flavorCategoryDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, flavorCategoryPerm) {
 		return
@@ -193,6 +193,6 @@ func (h *Handler) flavorCategoryDelete(w http.ResponseWriter, r *http.Request) {
 	if _, err := h.repo.DeleteDoc(r.Context(), flavorCategoryCollection, id); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditService.auditAdmin(flavorCategory, DELETE, PLATFORM)
+	// TODO(audit): write an admin DELETE audit event for the flavor category.
 	w.WriteHeader(http.StatusNoContent)
 }

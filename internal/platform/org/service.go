@@ -78,7 +78,7 @@ func (s *Service) GetOrganizationForUser(ctx context.Context, id, userSub string
 }
 
 // GetOrganizationForBillingProfile resolves the org owning a billing profile:
-// findAllByBillingProfileId → filter(isMember) → findFirst → orElseThrow 404. So a
+// find every org for the profile id → keep those the user is a member of → take the first → 404 otherwise. So a
 // missing profile AND a non-member BOTH yield 404 "Billing Profile not found" (capital
 // P, no 400) — there is no separate membership-400 here.
 func (s *Service) GetOrganizationForBillingProfile(ctx context.Context, bpID, userSub string) (*Organization, error) {

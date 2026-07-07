@@ -23,23 +23,23 @@ import (
 // Newly registered here:
 //   - PUT    /admin/bill/{id}                       update — status/invoiceCurrency/invoiceGatewayId/billingProfileId
 //   - DELETE /admin/bill/{id}                       delete
-//   - GET    /admin/bill/{id}                       getBill → BillFinancialOverview (pricing recompute — not wired)
-//   - GET    /admin/bill/{billingProfileId}/billing-profile  getBillsByBillingProfileId → overview page (not wired)
-//   - GET    /admin/bill/download/{billId}          downloadStatement → PDF render (not wired)
+//   - GET    /admin/bill/{id}                       bill financial overview (pricing recompute — not wired)
+//   - GET    /admin/bill/{billingProfileId}/billing-profile  bills for a billing profile → overview page (not wired)
+//   - GET    /admin/bill/download/{billId}          statement PDF render (not wired)
 //
-// Perms (AdminPermissionEnum → admin:* key):
+// Perms (admin:* permission key):
 //   - read endpoints  → ADMIN_BILL_READ   = admin:bill:read
 //   - update/delete   → ADMIN_BILL_MANAGE = admin:bill:manage
 //
 // update/delete write audit events (UPDATE/DELETE BILL) — deferred this
 // pass (// TODO(audit)); the persisted state + the response envelope are faithful.
 //
-// ⚠ MONEY/PRICING: getBill / getBillFinancialOverviewPage build a BillFinancialOverview by RECOMPUTING
-// net/gross/unpaid through the golden-tested pricing engine (getGrossAmountBill /
-// getUnpaidGrossAmountBill / getNetAmountBillProductCurrencyWithAdjustments). That engine
+// ⚠ MONEY/PRICING: the two overview reads build a BillFinancialOverview by RECOMPUTING
+// net/gross/unpaid through the golden-tested pricing engine (gross amount, unpaid gross
+// amount, and net amount in product currency with adjustments). That engine
 // is not wired into the admin Handler (no new dep allowed this pass), and a raw passthrough would emit
 // the wrong DTO shape + the wrong (un-taxed/un-FX'd) numbers — worse than failing. So both overview
-// reads are NOT WIRED (501). downloadStatement renders a PDF — an external render,
+// reads are NOT WIRED (501). The statement download renders a PDF — an external render,
 // also not wired.
 
 const billCollection = "bill"
@@ -62,18 +62,17 @@ func (h *Handler) routeBill(r chi.Router) {
 	r.Get("/bill/{id}/billing-profile", h.billsByBillingProfile)
 }
 
-// billNotFound is the exact 404 from getById:
-// notFound(BILL_ID_NOT_FOUND, id). The `billIdNotFound`
-// translation interpolates the id, with the interpolation convention used
-// across the admin 404s.
+// billNotFound builds the exact 404 returned when a bill id is absent,
+// interpolating the id into the message using the same convention as the
+// other admin 404s.
 func billNotFound(id string) *httpx.HTTPError {
 	return httpx.NotFound(fmt.Sprintf("Bill with id %s not found", id))
 }
 
-// billUpdateReq is the mutable fields update copies from the request-body Bill:
+// billUpdateReq holds the four mutable fields the update copies from the request-body bill:
 // status, invoiceCurrency, invoiceGatewayId, billingProfileId. (Exactly these four are overwritten —
-// every other Bill field, incl. items/createdAt, is left as the persisted entity's value.) A
-// null/omitted body field becomes null on the entity → dropped here when empty.
+// every other bill field, incl. items/createdAt, keeps the persisted value.) A
+// null/omitted body field is dropped here when empty.
 type billUpdateReq struct {
 	Status           string `json:"status"`
 	InvoiceCurrency  string `json:"invoiceCurrency"`
@@ -81,8 +80,8 @@ type billUpdateReq struct {
 	BillingProfileID string `json:"billingProfileId"`
 }
 
-// setMap builds the $set-equivalent JSON for the four overwritten fields. A blank string is omitted
-// so the field is dropped on the entity (setX(null) → dropped from the JSON when empty).
+// setMap builds the update document for the four overwritten fields. A blank string is omitted
+// so the field is dropped rather than written as empty.
 func (req billUpdateReq) setMap() pgdoc.M {
 	d := pgdoc.M{}
 	if req.Status != "" {
@@ -100,8 +99,8 @@ func (req billUpdateReq) setMap() pgdoc.M {
 	return d
 }
 
-// billUpdate updates a bill: findById-or-404 → overwrite
-// status/invoiceCurrency/invoiceGatewayId/billingProfileId from the body → save → single(bill).
+// billUpdate updates a bill: load by id or 404 → overwrite
+// status/invoiceCurrency/invoiceGatewayId/billingProfileId from the body → save → return the bill.
 // Gated ADMIN_BILL_MANAGE.
 func (h *Handler) billUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, billManagePerm) {
@@ -122,8 +121,8 @@ func (h *Handler) billUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := maps.Clone(existing) // snapshot the pre-mutation state for the audit field-diff
-	// Overwrite exactly the four fields update() sets (drop-first so an omitted/null body
-	// field becomes null, matching existing.setX(body.getX()) with body.getX()==null).
+	// Overwrite exactly the four editable fields (drop-first so an omitted/null body
+	// field is cleared rather than left at its old value).
 	for _, k := range []string{"status", "invoiceCurrency", "invoiceGatewayId", "billingProfileId"} {
 		delete(existing, k)
 	}
@@ -134,7 +133,7 @@ func (h *Handler) billUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// UPDATE audit: field-level before/after diff onto the audit event (the middleware
-	// computes diffSnapshots(before, after) → AuditEvent.changes). Re-read the AFTER from the datastore so
+	// diffs the before and after snapshots into the event's changes). Re-read the AFTER from the datastore so
 	// both snapshots are store-decoded (same store types/shape) — avoids spurious diffs from comparing
 	// the Go-rebuilt map against the datastore-decoded `before`.
 	after, _ := h.repo.FindDoc(r.Context(), billCollection, id)
@@ -142,27 +141,27 @@ func (h *Handler) billUpdate(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// billDelete deletes a bill: deleteById (the bill is NOT
-// looked up first — the audit event is logged then deleteById is called unconditionally) →
-// success() = {data:"Successful operation"}. Gated ADMIN_BILL_MANAGE.
+// billDelete deletes a bill by id (the bill is NOT looked up first — the audit event is
+// logged, then the delete runs unconditionally) → {data:"Successful operation"}.
+// Gated ADMIN_BILL_MANAGE.
 func (h *Handler) billDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, billManagePerm) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	// deleteById is idempotent (no 404 on a missing id) — the handler returns
+	// The delete is idempotent (no 404 on a missing id) — the handler returns
 	// success regardless. DeleteDoc returns 0 deleted for a missing id; we ignore the count.
 	if _, err := h.repo.DeleteDoc(r.Context(), billCollection, id); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): logAsync(adminEventFromContext DELETE BILL resourceId=id SUCCESS)
+	// TODO(audit): write an admin audit event for the bill deletion (DELETE BILL, resourceId=id).
 	httpx.OK(w, "Successful operation")
 }
 
 // billGet builds a BillFinancialOverview
 // by recomputing net/gross/unpaid through the pricing engine. The engine is not wired into the
 // admin Handler this pass and a raw passthrough would emit the wrong shape/numbers (see file header).
-// Returns 404 first if the bill is absent (getBill → getById-or-404),
+// Returns 404 first if the bill is absent,
 // otherwise 501. Gated ADMIN_BILL_READ.
 func (h *Handler) billGet(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, billReadPerm) {
@@ -208,7 +207,7 @@ func (h *Handler) billsByBillingProfile(w http.ResponseWriter, r *http.Request) 
 
 // billDownload renders the
 // consumption-summary statement PDF and streams the
-// bytes. Returns the bill 404 first (download → getById-or-404). Gated ADMIN_BILL_READ.
+// bytes. Returns the bill 404 first if it is absent. Gated ADMIN_BILL_READ.
 func (h *Handler) billDownload(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, billReadPerm) {
 		return

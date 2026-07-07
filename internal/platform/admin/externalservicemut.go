@@ -7,18 +7,18 @@ package admin
 // share/protocols | availability-zones | vhi/placement-quotas | public-networks). NONE of those is
 // re-registered here — only the missing mutations are added.
 //
-// Call graph:
+// Flow:
 //
-//	create(es)                = add(es): validate(live keystone autoFill) → encrypt → save → decrypt
-//	                            THEN externalServiceTasks.execute(es)               [CLOUD, not wired]
-//	update(id,es,prov)        = get(id) → update(id,es,prov): validate(live) → re-provision
-//	                            THEN execute(es) when provisioning                   [CLOUD, not wired]
+//	create(es)                = validate (live keystone auto-fill) → encrypt → save → decrypt,
+//	                            THEN post-create provisioning against OpenStack     [CLOUD, not wired]
+//	update(id,es,prov)        = look up → validate (live) → re-provision,
+//	                            THEN provisioning when requested                     [CLOUD, not wired]
 //	delete(id)                = in-use guards (project/user/cloudResource → exact 400s)
-//	                            THEN get(id)-or-404 → deleteById(id)  [pure datastore — faithful]
-//	updateExternalService     = PUT /{id}/update: get(id)-or-404 → encryptAndSave(existing)
+//	                            THEN look up (404 if absent) → delete  [pure datastore — faithful]
+//	PUT /{id}/update          = look up (404 if absent) → encrypt-and-save
 //	                            [pure datastore no-op re-save — faithful]
-//	the field-set PUTs        = get(id)-or-404 → mutate one OpenstackConfig (or secret) field →
-//	                            encryptAndSave  [pure datastore $set/replace — IN SCOPE, faithful]:
+//	the field-set PUTs        = look up (404 if absent) → mutate one OpenstackConfig (or secret) field →
+//	                            encrypt-and-save  [pure datastore $set/replace — IN SCOPE, faithful]:
 //	    /{id}/quota               provisioning.quota = body
 //	    /{id}/features            config.features = body (+ enabledConsoleTypes when present)
 //	    /{id}/configuration       name,status + config.openstackReseller = body's
@@ -30,13 +30,13 @@ package admin
 //	    /{id}/gnocchi-granularity config.gnocchiGranularity = body.granularity
 //	    /{id}/vhi-ostor           config.vhiOstorConfig (+ secret.vhiOstorAuth when present) = body
 //
-// EXTERNAL INTEGRATION POINTS (create / update): add()/update() run serviceValidate → autoFillForOpenStackFields,
-// which performs a LIVE keystone authenticate against the configured region (sets adminUserId /
-// adminDomainId from the live token, validates the domain) — there is NO clean datastore-only effect to
-// persist before that live call (the validation IS the live call, and it mutates the doc with
-// live-derived ids before save). Per the cloud-write rule these are not wired: 501, never live.
-// `externalServiceTasks.execute()` (post-create/update provisioning against OpenStack) is likewise
-// live. The persisted field-set PUTs above touch ONLY stored config and are handled faithfully.
+// EXTERNAL INTEGRATION POINTS (create / update): create and update both run a service validation →
+// OpenStack field auto-fill, which performs a LIVE keystone authenticate against the configured
+// region (sets adminUserId / adminDomainId from the live token, validates the domain) — there is
+// NO clean datastore-only effect to persist before that live call (the validation IS the live call,
+// and it mutates the doc with live-derived ids before save). Per the cloud-write rule these are not
+// wired: 501, never live. The post-create/update provisioning against OpenStack is likewise live.
+// The persisted field-set PUTs above touch ONLY stored config and are handled faithfully.
 //
 // The externalService doc carries secret.adminPassword (the OpenStack OS_PASSWORD); every response
 // that returns the doc strips it via the existing shapeExternalService helper (handler.go).
@@ -86,28 +86,27 @@ func (h *Handler) routeExternalServiceMut(r chi.Router) {
 	r.Put("/service/{id}/vhi-ostor", h.externalServiceUpdateVhiOstor)
 }
 
-// serviceNotFoundErr is the exact 404 thrown by get(id) →
-// ServiceNotFoundException("Service not found: %s") (interpolated, no trailing space). All the
-// field-set PUTs (and PUT /{id}/update) resolve the doc via get(id) → this 404 when absent.
+// serviceNotFoundErr is the 404 returned when a service id is not found
+// ("Service not found: %s", interpolated, no trailing space). All the field-set PUTs (and PUT
+// /{id}/update) resolve the doc by id → this 404 when absent.
 func serviceNotFoundErr(id string) *httpx.HTTPError {
 	return httpx.NotFound(fmt.Sprintf("Service not found: %s", id))
 }
 
-// externalServiceCreate handles create() = add():
-// serviceValidate → autoFillForOpenStackFields (LIVE keystone authenticate, sets live-derived
-// adminUserId/adminDomainId on the doc) → encrypt → save → decrypt, THEN
-// externalServiceTasks.execute (live provisioning). The validation IS the live cloud call and it
-// mutates the doc with live-derived ids before persisting, so there is no clean datastore-only effect to
-// commit first → CLOUD write not wired (501).
+// externalServiceCreate is the create path: validate → OpenStack field auto-fill (LIVE keystone
+// authenticate, sets live-derived adminUserId/adminDomainId on the doc) → encrypt → save → decrypt,
+// THEN live provisioning. The validation IS the live cloud call and it mutates the doc with
+// live-derived ids before persisting, so there is no clean datastore-only effect to commit first →
+// CLOUD write not wired (501).
 func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, externalServiceManagePerm) {
 		return
 	}
-	// No-live adaptation (mirrors externalServiceUpdate): add() runs a LIVE keystone
-	// autoFillForOpenStackFields + externalServiceTasks.execute (provisioning). We PERSIST the
-	// operator-supplied doc and SKIP the live validate+provision — the connection is then exercised
-	// by the detail page's Test connection + the live cloud reads (os-images etc.) using the stored
-	// creds. ⚠ No live autoFill of adminUserId/adminDomainId.
+	// No-live adaptation (mirrors externalServiceUpdate): the create path would run a LIVE keystone
+	// field auto-fill + provisioning. We PERSIST the operator-supplied doc and SKIP the live
+	// validate+provision — the connection is then exercised by the detail page's Test connection +
+	// the live cloud reads (os-images etc.) using the stored creds. ⚠ No live auto-fill of
+	// adminUserId/adminDomainId.
 	var body map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
@@ -136,7 +135,7 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 	doc["_id"] = pgdoc.NewID()
 	doc["createdAt"] = time.Now().UTC()
 	// Encrypt the whole (all-new, plaintext) secret sub-document before it reaches the datastore so cloud
-	// credentials are never stored at rest — symmetric with Service.decrypt on the read path.
+	// credentials are never stored at rest — symmetric with the decrypt on the read path.
 	if sec, ok := doc["secret"]; ok && h.esSvc != nil {
 		doc["secret"] = h.esSvc.EncryptSecret(sec)
 	}
@@ -150,20 +149,20 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 	if id, _ := doc["_id"].(string); id != "" {
 		h.enrichNewServiceFromCloud(r.Context(), doc, id)
 	}
-	// TODO(audit): auditService.auditAdmin(result, CREATE, PLATFORM)
+	// TODO(audit): write an admin audit event when a service is created.
 	shapeExternalService(doc) // strips secret, _id→id
 	httpx.OK(w, doc)
 }
 
-// externalServiceUpdate handles update() (PUT /service/{id} — the Connection-tab Save).
-// update re-runs a LIVE keystone autoFill + re-provisioning; per the no-live constraint we
+// externalServiceUpdate is the update path (PUT /service/{id} — the Connection-tab Save).
+// The original re-runs a LIVE keystone auto-fill + re-provisioning; per the no-live constraint we
 // PERSIST the edited connection fields (name/status/defaultPricePlan/config/secret) and SKIP the live
 // validate+provision. This lets the admin change the OpenStack account/region via the UI; the real
 // auth is then exercised by the live cloud reads (os-images etc.) using the stored creds.
-// ⚠ No live autoFill of adminUserId/adminDomainId — no-live adaptation.
+// ⚠ No live auto-fill of adminUserId/adminDomainId — no-live adaptation.
 func (h *Handler) externalServiceUpdate(w http.ResponseWriter, r *http.Request) {
 	// TODO(audit): UPDATE PLATFORM audit event
-	// TODO: live autoFillForOpenStackFields + externalServiceTasks.execute (provisioning).
+	// TODO: live keystone field auto-fill + provisioning.
 	h.serviceFieldSet(w, r, h.applyServiceConnectionBody)
 }
 
@@ -213,7 +212,7 @@ func (h *Handler) applyServiceConnectionBody(req *http.Request, doc pgdoc.M) *ht
 			}
 			// Encrypt each NEWLY-supplied value before it lands in the datastore. Only new values are
 			// encrypted — the stored (already-ciphertext) values are left untouched above, so a
-			// re-save never double-encrypts them. Symmetric with Service.decrypt on read.
+			// re-save never double-encrypts them. Symmetric with the decrypt on read.
 			if h.esSvc != nil {
 				secret[k] = h.esSvc.EncryptSecret(v)
 			} else {
@@ -224,16 +223,16 @@ func (h *Handler) applyServiceConnectionBody(req *http.Request, doc pgdoc.M) *ht
 	return nil
 }
 
-// externalServiceDelete handles delete(): the three in-use guards (exact 400 strings, in order:
-// projects → users → cloud resources), then delete = get(id)-or-404 →
-// deleteById(id). The deletion is pure datastore (delete has NO live cloud teardown) → faithful.
-// Returns a 200 with an empty body on success.
+// externalServiceDelete runs the three in-use guards (exact 400 strings, in order: projects →
+// users → cloud resources), then looks up by id (404 if absent) and deletes. The deletion is pure
+// datastore (delete has NO live cloud teardown) → faithful. Returns a 200 with an empty body on
+// success.
 func (h *Handler) externalServiceDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, externalServiceManagePerm) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	// projectService.isExternalServiceInUse(id) = exists(project where services.serviceId == id).
+	// In use if any project references this service via services.serviceId.
 	inUse, err := h.repo.externalServiceInUse(r.Context(), "project", id)
 	if httpx.WriteError(w, err) {
 		return
@@ -242,7 +241,7 @@ func (h *Handler) externalServiceDelete(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, httpx.BadRequest("External service is in use for some projects"))
 		return
 	}
-	// userService.isExternalServiceInUse(id) = exists(user where services.serviceId == id).
+	// In use if any user references this service via services.serviceId.
 	inUse, err = h.repo.externalServiceInUse(r.Context(), "users", id)
 	if httpx.WriteError(w, err) {
 		return
@@ -251,7 +250,7 @@ func (h *Handler) externalServiceDelete(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, httpx.BadRequest("External service is in use for some users"))
 		return
 	}
-	// cloudResourceService.isExternalServiceInUse(id) = existsByServiceId.
+	// In use if any cloud resource references this service.
 	inUse, err = h.repo.externalServiceInUse(r.Context(), "cloudResource", id)
 	if httpx.WriteError(w, err) {
 		return
@@ -260,7 +259,7 @@ func (h *Handler) externalServiceDelete(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, httpx.BadRequest("External service is in use for some cloud resources"))
 		return
 	}
-	// delete = get(id)-or-404 then deleteById (pure datastore, faithful).
+	// Look up by id (404 if absent), then delete (pure datastore, faithful).
 	existing, err := h.repo.FindDoc(r.Context(), externalServiceCollection, id)
 	if httpx.WriteError(w, err) {
 		return
@@ -277,16 +276,16 @@ func (h *Handler) externalServiceDelete(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusOK)
 }
 
-// externalServiceUpdateNoProvision handles PUT /{id}/update → updateExternalService:
-// get(id)-or-404 → persist the edited connection fields (same merge as the Connection-tab Save) →
-// save. No cloud call (this is the no-provision update path).
+// externalServiceUpdateNoProvision handles PUT /{id}/update: look up by id (404 if absent) →
+// persist the edited connection fields (same merge as the Connection-tab Save) → save. No cloud
+// call (this is the no-provision update path).
 func (h *Handler) externalServiceUpdateNoProvision(w http.ResponseWriter, r *http.Request) {
 	h.serviceFieldSet(w, r, h.applyServiceConnectionBody)
 }
 
-// externalServiceUpdateQuota handles PUT /{id}/quota → updateQuota:
-// config.provisioning.quota = body. The whole quota object is stored (the live OpenStack quota push
-// is a separate provider path NOT triggered by this endpoint → nothing deferred here).
+// externalServiceUpdateQuota handles PUT /{id}/quota: config.provisioning.quota = body. The whole
+// quota object is stored (the live OpenStack quota push is a separate provider path NOT triggered
+// by this endpoint → nothing deferred here).
 func (h *Handler) externalServiceUpdateQuota(w http.ResponseWriter, r *http.Request) {
 	h.serviceFieldSet(w, r, func(req *http.Request, doc pgdoc.M) *httpx.HTTPError {
 		var body json.RawMessage
@@ -300,7 +299,7 @@ func (h *Handler) externalServiceUpdateQuota(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-// externalServiceUpdateFeatures handles PUT /{id}/features → updateFeatures:
+// externalServiceUpdateFeatures handles PUT /{id}/features:
 // config.features = body (+ config.enabledConsoleTypes = features.enabledConsoleTypes when present).
 func (h *Handler) externalServiceUpdateFeatures(w http.ResponseWriter, r *http.Request) {
 	h.serviceFieldSet(w, r, func(req *http.Request, doc pgdoc.M) *httpx.HTTPError {
@@ -310,7 +309,7 @@ func (h *Handler) externalServiceUpdateFeatures(w http.ResponseWriter, r *http.R
 		}
 		cfg := ensureConfig(doc)
 		cfg["features"] = body
-		// if features.getEnabledConsoleTypes() != null → config.setEnabledConsoleTypes(...).
+		// Copy enabledConsoleTypes onto config when the body carries it.
 		if v, ok := body["enabledConsoleTypes"]; ok && v != nil {
 			cfg["enabledConsoleTypes"] = v
 		}
@@ -318,7 +317,7 @@ func (h *Handler) externalServiceUpdateFeatures(w http.ResponseWriter, r *http.R
 	})
 }
 
-// externalServiceUpdateConfiguration handles PUT /{id}/configuration → updateConfiguration:
+// externalServiceUpdateConfiguration handles PUT /{id}/configuration:
 // name = body.name, status = body.status, config.openstackReseller = body.config.openstackReseller.
 // (Only these three are copied; the rest of the existing config is preserved — faithful.)
 func (h *Handler) externalServiceUpdateConfiguration(w http.ResponseWriter, r *http.Request) {
@@ -339,11 +338,10 @@ func (h *Handler) externalServiceUpdateConfiguration(w http.ResponseWriter, r *h
 	})
 }
 
-// externalServiceUpdateVolumeTypes handles PUT /{id}/volume/types → updateVolumeTypes:
-// config.features.volumeTypes = body (a map of region → volume-type list). The original sets
-// config.getFeatures().setVolumeTypes(...) directly (NPE if features is null — preserved: we set
-// only when features exists, else create it, matching the practical post-create state where features
-// is always initialized).
+// externalServiceUpdateVolumeTypes handles PUT /{id}/volume/types:
+// config.features.volumeTypes = body (a map of region → volume-type list). The original writes into
+// config.features directly (NPE if features is null — preserved: we set only when features exists,
+// else create it, matching the practical post-create state where features is always initialized).
 func (h *Handler) externalServiceUpdateVolumeTypes(w http.ResponseWriter, r *http.Request) {
 	h.serviceFieldSet(w, r, func(req *http.Request, doc pgdoc.M) *httpx.HTTPError {
 		var body json.RawMessage
@@ -357,7 +355,7 @@ func (h *Handler) externalServiceUpdateVolumeTypes(w http.ResponseWriter, r *htt
 	})
 }
 
-// externalServiceUpdateShareProtocols handles PUT /{id}/share/protocols → updateShareProtocols:
+// externalServiceUpdateShareProtocols handles PUT /{id}/share/protocols:
 // config.features.shareProtocols = body (creating features when null).
 func (h *Handler) externalServiceUpdateShareProtocols(w http.ResponseWriter, r *http.Request) {
 	h.serviceFieldSet(w, r, func(req *http.Request, doc pgdoc.M) *httpx.HTTPError {
@@ -372,10 +370,10 @@ func (h *Handler) externalServiceUpdateShareProtocols(w http.ResponseWriter, r *
 	})
 }
 
-// externalServiceUpdateVHIPlacementQuota handles PUT /{id}/vhi/placement-quotas →
-// updateVHIPlacementQuota: config.provisioning.quota.placementQuotas = body (creating the quota
-// object when null). This stores the quotas; it does NOT push to OpenStack from this
-// endpoint (the live VHI placement push is a separate provider path) → nothing deferred.
+// externalServiceUpdateVHIPlacementQuota handles PUT /{id}/vhi/placement-quotas:
+// config.provisioning.quota.placementQuotas = body (creating the quota object when null). This
+// stores the quotas; it does NOT push to OpenStack from this endpoint (the live VHI placement push
+// is a separate provider path) → nothing deferred.
 func (h *Handler) externalServiceUpdateVHIPlacementQuota(w http.ResponseWriter, r *http.Request) {
 	h.serviceFieldSet(w, r, func(req *http.Request, doc pgdoc.M) *httpx.HTTPError {
 		var body json.RawMessage
@@ -390,8 +388,7 @@ func (h *Handler) externalServiceUpdateVHIPlacementQuota(w http.ResponseWriter, 
 	})
 }
 
-// externalServiceUpdateReseller handles PUT /{id}/reseller → updateOpenstackReseller:
-// config.openstackReseller = body.
+// externalServiceUpdateReseller handles PUT /{id}/reseller: config.openstackReseller = body.
 func (h *Handler) externalServiceUpdateReseller(w http.ResponseWriter, r *http.Request) {
 	h.serviceFieldSet(w, r, func(req *http.Request, doc pgdoc.M) *httpx.HTTPError {
 		var body json.RawMessage
@@ -404,10 +401,10 @@ func (h *Handler) externalServiceUpdateReseller(w http.ResponseWriter, r *http.R
 	})
 }
 
-// externalServiceUpdateAvailabilityZones handles PUT /{id}/availability-zones →
-// updateOpenstackAvailabilityZones: config.availabilityZones = body (the stored map; distinct from
-// the live GET /{id}/availability-zones which queries OpenStack — that read is the emptyCloudList
-// stub in handler.go). Stores only → nothing deferred.
+// externalServiceUpdateAvailabilityZones handles PUT /{id}/availability-zones:
+// config.availabilityZones = body (the stored map; distinct from the live GET
+// /{id}/availability-zones which queries OpenStack — that read is the emptyCloudList stub in
+// handler.go). Stores only → nothing deferred.
 func (h *Handler) externalServiceUpdateAvailabilityZones(w http.ResponseWriter, r *http.Request) {
 	h.serviceFieldSet(w, r, func(req *http.Request, doc pgdoc.M) *httpx.HTTPError {
 		var body json.RawMessage
@@ -420,8 +417,8 @@ func (h *Handler) externalServiceUpdateAvailabilityZones(w http.ResponseWriter, 
 	})
 }
 
-// externalServiceUpdateGnocchiGranularity handles PUT /{id}/gnocchi-granularity →
-// updateGnocchiGranularity: config.gnocchiGranularity = body.granularity (an int).
+// externalServiceUpdateGnocchiGranularity handles PUT /{id}/gnocchi-granularity:
+// config.gnocchiGranularity = body.granularity (an int).
 func (h *Handler) externalServiceUpdateGnocchiGranularity(w http.ResponseWriter, r *http.Request) {
 	h.serviceFieldSet(w, r, func(req *http.Request, doc pgdoc.M) *httpx.HTTPError {
 		var body struct {
@@ -436,7 +433,7 @@ func (h *Handler) externalServiceUpdateGnocchiGranularity(w http.ResponseWriter,
 	})
 }
 
-// externalServiceUpdateVhiOstor handles PUT /{id}/vhi-ostor → updateVhiOstorConfig:
+// externalServiceUpdateVhiOstor handles PUT /{id}/vhi-ostor:
 // config.vhiOstorConfig = body.vhiOstorConfig, and when body.vhiOstorAuth is present, merge its
 // non-blank accessKey/secretKey into secret.vhiOstorAuth (creating it when null). ⚠ This writes the
 // stored secret; the response strips `secret` via shapeExternalService (no credential leak).
@@ -454,7 +451,7 @@ func (h *Handler) externalServiceUpdateVhiOstor(w http.ResponseWriter, r *http.R
 		}
 		cfg := ensureConfig(doc)
 		cfg["vhiOstorConfig"] = rawJSON(body.VhiOstorConfig)
-		// if updateRequest.getVhiOstorAuth() != null → merge non-blank keys into the secret.
+		// When the body carries vhiOstorAuth, merge its non-blank keys into the secret.
 		if body.VhiOstorAuth != nil {
 			secret := ensureMap(doc, "secret")
 			auth := ensureMap(secret, "vhiOstorAuth")
@@ -470,10 +467,10 @@ func (h *Handler) externalServiceUpdateVhiOstor(w http.ResponseWriter, r *http.R
 }
 
 // serviceFieldSet is the shared body for every persisted field-set PUT (and the no-op /update):
-// gate ADMIN_SERVICE_MANAGE → get(id)-or-404 (exact "Service not found: %s") → apply the per-field
-// mutation onto the stored doc → ReplaceDoc → return single(shapeExternalService(doc)) with the
-// secret stripped. The `apply` closure decodes the body and mutates the doc; a returned *HTTPError
-// (e.g. a bad body) short-circuits before the find. This is a get(id) → mutate → save.
+// gate ADMIN_SERVICE_MANAGE → look up by id (404, exact "Service not found: %s") → apply the
+// per-field mutation onto the stored doc → ReplaceDoc → return the shaped doc (shapeExternalService)
+// with the secret stripped. The `apply` closure decodes the body and mutates the doc; a returned
+// *HTTPError (e.g. a bad body) short-circuits before the find. This is a look-up → mutate → save.
 func (h *Handler) serviceFieldSet(w http.ResponseWriter, r *http.Request, apply func(*http.Request, pgdoc.M) *httpx.HTTPError) {
 	if !h.require(w, r, externalServiceManagePerm) {
 		return
@@ -500,8 +497,8 @@ func (h *Handler) serviceFieldSet(w http.ResponseWriter, r *http.Request, apply 
 }
 
 // ensureConfig returns the doc's `config` sub-map, creating an empty one when absent or non-map
-// (getOpenstackConfig deserializes the stored config; a missing config in
-// the practical post-create state never happens, but we create-on-write to stay nil-safe).
+// (the stored config is always present in the practical post-create state, but we create-on-write
+// to stay nil-safe).
 func ensureConfig(doc pgdoc.M) pgdoc.M {
 	return ensureMap(doc, "config")
 }

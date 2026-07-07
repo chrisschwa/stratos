@@ -334,7 +334,7 @@ func run() error {
 		}
 		authn.SetRealms(ar)
 	}()
-	// Admin-API SigV4 (AwsSigV4VerifierFilter): resolve access keys from hmac_keys. The hmac_keys
+	// Admin-API SigV4 verification: resolve access keys from hmac_keys. The hmac_keys
 	// collection also holds provider keys (erpCreate) that must NOT grant Admin-API / MCP access, so
 	// the lookup EXCLUDES purpose:"provider". A $ne match also accepts docs with no purpose field, so
 	// legacy admin/MCP keys minted before purpose-scoping (no purpose stamped) still authenticate —
@@ -420,7 +420,7 @@ func run() error {
 	}
 
 	// Scheduled jobs: the charge cron + the gnocchi metrics
-	// ingestion, each guarded by a ShedLock so it runs once across the fleet. The charge
+	// ingestion, each guarded by a distributed lock so it runs once across the fleet. The charge
 	// step reads the PostgreSQL cache (cloudResource/gnocchiMetrics/pricePlan); the metrics job
 	// hits the live cloud per ExternalService. Wired always, STARTED only when
 	// STRATOS_JOBS_SCHEDULER_ENABLED=true — so a plain deploy never charges bills until the
@@ -455,12 +455,12 @@ func run() error {
 	savingsSvc.SetNotifier(mailSvc)
 	suspensionJob := billing.NewSuspensionJob(billingRepo, log)
 	suspensionJob.SetNotifier(mailSvc)
-	suspensionJob.SetAudit(auditSvc) // auditSystem CREATE/NOTIFY/SUSPEND/UNSUSPEND trail
+	suspensionJob.SetAudit(auditSvc) // writes a system audit trail for CREATE/NOTIFY/SUSPEND/UNSUSPEND
 	cloudSuspender := billingCloudSuspender{orgs: orgRepo, projects: projectRepo, cloud: cloudRepo, services: esSvc, log: log}
 	suspensionJob.SetCloudSuspender(cloudSuspender)
 	// ActivationService (billing/activation): the DIRECT activate/suspend/resume driven by
-	// the admin status transitions + the public Admin API. activateProjects =
-	// getProjectsToActivate + provisionProjectMemberships + bootstrapProject.
+	// the admin status transitions + the public Admin API. Activating a profile provisions
+	// each eligible project's memberships then bootstraps it onto the cloud.
 	activationSvc := billing.NewActivationService(billingRepo, auditSvc, log)
 	activationSvc.SetClouds(cloudSuspender)
 	activationSvc.SetNotifier(mailSvc)
@@ -507,9 +507,9 @@ func run() error {
 		return nil
 	})
 	adminH.SetActivation(activationSvc)
-	// Admin user-create projectIds loop → ProjectInviteService.inviteToProject (best-effort).
+	// On admin user-create, loop the given project IDs and send a project invite for each (best-effort).
 	adminH.SetInviteToProject(inviteH.InviteToProject)
-	// Live per-project cloud legs for the admin ProjectAdmin/CloudResourceAdmin mutations:
+	// Live per-project cloud legs for the admin project + cloud-resource mutations:
 	// nova pause/unpause, scoped sync, keystone bootstrap.
 	adminH.SetProjectCloudOps(&admin.ProjectCloudOps{
 		PauseServers: func(ctx context.Context, projectID string, pause bool) error {
@@ -545,8 +545,8 @@ func run() error {
 			}
 			return err
 		},
-		// Light pre-check for scheduleProjectDeletion: the project must resolve (a deeper
-		// "no locked resources" gate could go here later).
+		// Light pre-check before scheduling a project for deletion: the project must resolve (a
+		// deeper "no locked resources" gate could go here later).
 		CanDelete: func(ctx context.Context, projectID string) error {
 			p, err := projectSvc.GetProjectByID(ctx, projectID)
 			if err != nil {
@@ -557,8 +557,8 @@ func run() error {
 			}
 			return nil
 		},
-		// deleteProjectNow → async cloud cascade (fire-and-forget): delete the project's cloud
-		// resources + tenant, then mark it DELETED. Detached context so it outlives the request.
+		// Delete the project now: an async cloud cascade (fire-and-forget) — delete the project's
+		// cloud resources + tenant, then mark it DELETED. Detached context so it outlives the request.
 		Teardown: func(_ context.Context, projectID string) error {
 			go func() {
 				if err := projectH.TeardownProject(context.Background(), projectID); err != nil {
@@ -593,7 +593,7 @@ func run() error {
 		}
 		return orderRepo.UpdateStatusForProfile(ctx, orderID, billingProfileID, status)
 	}
-	// processSuccessTransaction/processCollect SUCCESS side-effects: suspension re-review, the
+	// Side-effects when a deposit or collect transaction succeeds: suspension re-review, the
 	// order PAID flip, and the deposit-targets-a-bill settle leg.
 	addFundsSvc.SetReviewer(suspensionJob)
 	addFundsSvc.SetOrderStatusUpdater(bindOrderPaid)
@@ -603,11 +603,11 @@ func run() error {
 	})
 	collectSvc.SetReviewer(suspensionJob)
 	collectSvc.SetOrderStatusUpdater(bindOrderPaid)
-	// monthlyBill (sendBills): finalize each profile's previous-month OPEN bill (OPEN→SENT/PAID) so
+	// Monthly bill finalization: finalize each profile's previous-month OPEN bill (OPEN→SENT/PAID) so
 	// the collect + dunning crons have SENT bills to act on.
 	billSendSvc := billing.NewBillSendService(billingRepo, pricingRepo)
 	billSendSvc.SetNotifier(mailSvc)
-	// executeProjectDeletion: cascade-delete a scheduled project's cloud resources (live
+	// Project-deletion job: cascade-delete a scheduled project's cloud resources (live
 	// WriteService.Delete per resource) then remove the doc. ⚠ performs LIVE cloud DELETEs.
 	deletionJob := project.NewDeletionJob(projectRepo, projectCloudDeleter{cloudRepo: cloudRepo, client: func() *client.Client { return cloudCli.Load() }}, log)
 	sched := scheduler.New(lock.New(pg))
@@ -702,8 +702,7 @@ func run() error {
 				n, err := suspensionJob.ExecuteDunning(r.Context())
 				jobResult(w, map[string]any{"ran": "dunning", "suspended": n}, err)
 			},
-			// gen-hmac-key implements the `hmac-key generate` SHELL command (HmacKeyService
-			// .generate) on the operator mgmt port: mints an Admin-API SigV4 key pair. The
+			// gen-hmac-key mints an Admin-API SigV4 key pair on the operator mgmt port. The
 			// secret is returned ONCE here and stored verbatim (stored in clear).
 			"gen-hmac-key": func(w http.ResponseWriter, r *http.Request) {
 				m := md5.Sum([]byte(uuid.NewString()))
@@ -889,8 +888,8 @@ func startChargeConsumer(rabbit *atomic.Pointer[amqp.Client], charger chargefano
 }
 
 // registerJobs wires the charge cron (minutely/hourly/monthly) + the gnocchi metrics job
-// with the verified cron specs + ShedLock names/durations. The charge crons
-// share atMostFor 5m / atLeastFor 30s; the metrics job uses atMostFor 10m / atLeastFor 30s.
+// with the verified cron specs + lock names/durations. The charge crons
+// share AtMostFor 5m / AtLeastFor 30s; the metrics job uses AtMostFor 10m / AtLeastFor 30s.
 func registerJobs(sched *scheduler.Scheduler, chargeDispatch func(context.Context, string) error, metrics *metricsjob.Job, sync *syncjob.Job, savings *billing.SavingsService, suspension *billing.SuspensionJob, collect *payment.CollectService, txnScan *payment.TransactionScanner, deletion *project.DeletionJob, billSend *billing.BillSendService, log *slog.Logger) {
 	chargeFn := func(timeUnit string) func(context.Context) {
 		return func(ctx context.Context) {
@@ -981,7 +980,7 @@ func registerJobs(sched *scheduler.Scheduler, chargeDispatch func(context.Contex
 
 // projectCloudDeleter implements project.ResourceDeleter: cascade-delete a project's cloud
 // resources via the live CloudClient. ⚠ performs
-// LIVE cloud DELETEs — aborts on the first failure so deleteProject rolls the project back to ENABLED.
+// LIVE cloud DELETEs — aborts on the first failure so the caller rolls the project back to ENABLED.
 
 // billingCloudSuspender is the live OpenStack suspend/resume for a billing profile:
 // resolve the profile's projects (via its orgs — greenfield projects inherit the org's bp), and
@@ -1035,7 +1034,7 @@ func (s billingCloudSuspender) forEachProjectServer(ctx context.Context, bpID st
 
 // pauseProjectServers is the CLOUD-only per-project leg: nova PAUSE/UNPAUSE every cached SERVER
 // through a tenant-scoped client. Best-effort — per-server/-service failures are logged and
-// skipped. Status flips stay with the callers (bp walk above; admin updateStatus handler).
+// skipped. Status flips stay with the callers (bp walk above; admin status-update handler).
 func (s billingCloudSuspender) pauseProjectServers(ctx context.Context, p *project.Project, pause bool) {
 	for _, serviceID := range p.ServiceIDs() {
 		es, err := s.services.Get(ctx, serviceID)

@@ -12,17 +12,17 @@ import (
 
 // adminpermission.go serves the MUTATIONS of the admin-permissions surface
 // (/api/v1/admin/admin-permissions): grant / update-role / revoke. The reads on this surface
-// (bare list = listAdminUsers, and /available-permissions) are already registered in handler.go
+// (the bare admin-user list, and /available-permissions) are already registered in handler.go
 // (listRaw "adminPermission" + availablePermissions) — NOT re-registered here.
 //
-// All three mutations gate on ADMIN_PERMISSION_MANAGE. The service writes audit
-// events (CREATE/UPDATE/DELETE on ADMIN_PERMISSION) — deferred this pass
+// All three mutations gate on "admin:permission:manage". Each mutation should write an
+// admin audit event (CREATE/UPDATE/DELETE on the admin permission) — deferred this pass
 // (// TODO(audit)); the persisted state + the response envelope are faithful.
 //
-// Response shape: grant + update return single(AdminPermission) — the RAW
+// Response shape: grant + update return a single AdminPermission object — the RAW
 // AdminPermission domain (null fields omitted): {sub, email?, role?, pending, createdAt?, updatedAt?}.
 // Note the id field is `sub` (stored as the `id`), so the JSON key is `sub`, NOT `id`. revoke
-// returns success() → httpx.OK(w, "Successful operation").
+// returns "Successful operation".
 
 const adminPermissionManagePerm = "admin:permission:manage"
 
@@ -35,7 +35,7 @@ func (h *Handler) routeAdminPermission(r chi.Router) {
 }
 
 // grantAdminPermissionRequest is the grant request ({sub required, role}).
-// `sub` here is really a username (email OR sub) — the handler resolves it via findBySubOrEmail.
+// `sub` here is really a username (email OR sub) — the handler resolves it to a real user sub.
 type grantAdminPermissionRequest struct {
 	Sub  string `json:"sub"`
 	Role string `json:"role"`
@@ -57,9 +57,9 @@ type adminPermissionView struct {
 	Pending bool   `json:"pending"`
 }
 
-// grantAdminPermission handles grantPermission (POST): ADMIN_PERMISSION_MANAGE. The request `sub` is
-// treated as an email/username; resolve the real User sub via findBySubOrEmail (nil when no User),
-// then save an AdminPermission keyed by sub-when-known else the email, with pending = (sub == null).
+// grantAdminPermission handles the grant (POST): gated on "admin:permission:manage". The request `sub` is
+// treated as an email/username; resolve the real user sub by sub-or-email (nil when no user),
+// then save an AdminPermission keyed by sub-when-known else the email, with pending = true when no sub resolved.
 func (h *Handler) grantAdminPermission(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, adminPermissionManagePerm) {
 		return
@@ -70,7 +70,7 @@ func (h *Handler) grantAdminPermission(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	email := req.Sub
-	// findBySubOrEmail(email): by identity-sub first, then by email. We approximate with the user
+	// Resolve by identity-sub first, then by email. We approximate with the user
 	// repo's FindBySub (matches the top-level sub) then FindByEmail.
 	var resolvedSub string
 	if u, err := h.users.FindBySub(r.Context(), email); err != nil {
@@ -89,12 +89,12 @@ func (h *Handler) grantAdminPermission(w http.ResponseWriter, r *http.Request) {
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(CREATE, ADMIN_PERMISSION, resourceId=email, {role})
+	// TODO(audit): write an admin audit event when an admin permission is granted.
 	httpx.OK(w, adminPermissionToView(saved))
 }
 
-// updateAdminPermission handles updatePermission (PUT /{userSub}): ADMIN_PERMISSION_MANAGE. Refuses
-// to change one's own role (400 "Cannot change your own role"), else findById-or-404 → set role.
+// updateAdminPermission handles the role update (PUT /{userSub}): gated on "admin:permission:manage". Refuses
+// to change one's own role (400 "Cannot change your own role"), else looks up by sub (404 when absent) and sets the role.
 func (h *Handler) updateAdminPermission(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, adminPermissionManagePerm) {
 		return
@@ -117,19 +117,19 @@ func (h *Handler) updateAdminPermission(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, httpx.NotFound(fmt.Sprintf("Admin permission not found for user: %s", userSub)))
 		return
 	}
-	// updateRole: keep sub/email/pending, overwrite ONLY role, save. A blank role becomes null
+	// Keep sub/email/pending, overwrite ONLY role, save. A blank role becomes null
 	// (removed) — omitted when empty.
 	if err := h.repo.UpdateAdminPermissionRole(r.Context(), userSub, req.Role); httpx.WriteError(w, err) {
 		return
 	}
 	existing.Role = req.Role
-	// TODO(audit): auditAdmin(UPDATE, ADMIN_PERMISSION, resourceId=userSub, {oldRole,newRole})
+	// TODO(audit): write an admin audit event when an admin permission's role changes.
 	httpx.OK(w, adminPermissionToView(existing))
 }
 
-// revokeAdminPermission handles revokePermission (DELETE /{userSub}): ADMIN_PERMISSION_MANAGE.
-// Refuses to revoke one's own access (400 "Cannot revoke your own admin access"), else deleteById →
-// success("Successful operation"). Does NOT 404 on a missing id (deleteById is a no-op).
+// revokeAdminPermission handles the revoke (DELETE /{userSub}): gated on "admin:permission:manage".
+// Refuses to revoke one's own access (400 "Cannot revoke your own admin access"), else deletes by id and
+// returns "Successful operation". Does NOT 404 on a missing id (the delete is a no-op).
 func (h *Handler) revokeAdminPermission(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, adminPermissionManagePerm) {
 		return
@@ -142,7 +142,7 @@ func (h *Handler) revokeAdminPermission(w http.ResponseWriter, r *http.Request) 
 	if _, err := h.repo.DeleteDoc(r.Context(), "adminPermission", userSub); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(DELETE, ADMIN_PERMISSION, resourceId=userSub)
+	// TODO(audit): write an admin audit event when an admin permission is revoked.
 	httpx.OK(w, "Successful operation")
 }
 

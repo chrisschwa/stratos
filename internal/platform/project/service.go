@@ -214,8 +214,8 @@ func (s *Service) UpdateOrganization(ctx context.Context, sub, id, targetOrgID s
 	return p, nil
 }
 
-// ScheduleDeletion marks the project for deferred deletion. Cloud
-// canProjectBeDeleted is deferred.
+// ScheduleDeletion marks the project for deferred deletion. The cloud-side
+// deletability check is deferred.
 func (s *Service) ScheduleDeletion(ctx context.Context, p *Project, _ bool) (*Project, error) {
 	if p.Status == StatusScheduledForDeletion || p.Status == StatusDeleteInProgress {
 		return nil, httpx.BadRequest("Project is already scheduled for deletion")
@@ -230,7 +230,7 @@ func (s *Service) ScheduleDeletion(ctx context.Context, p *Project, _ bool) (*Pr
 }
 
 // DeleteNow flags the project for immediate deletion.
-// The async cloud teardown (rabbit "executeProjectDeletion") is deferred.
+// The async cloud teardown is deferred.
 func (s *Service) DeleteNow(ctx context.Context, id string) (*Project, error) {
 	p, err := s.GetProjectByID(ctx, id)
 	if err != nil {
@@ -428,7 +428,7 @@ func mapRole(orgRole string) string {
 }
 
 // toView projects a Project into a ProjectView (resourcesCount empty for now —
-// the cloudResource aggregation lands with the cloud slice).
+// the per-type cloud-resource counts land with the cloud slice).
 func toView(p *Project) ProjectView {
 	return ProjectView{
 		ID:               p.ID,

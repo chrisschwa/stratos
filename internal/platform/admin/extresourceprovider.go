@@ -6,23 +6,22 @@ package admin
 // (h.externalResourceProviders → admin.Repo.ListExternalResourceProviders) and is intentionally NOT
 // re-registered here.
 //
-// Call graph:
+// Endpoint behavior:
 //
-//	create(body) = platformService.get(body.externalServiceId)  [→ ServiceNotFoundException if absent]
-//	               THEN service.create(externalService, body):
-//	                 hmacKey = hmacService.generate("Generated for external service provider <name> <url>")
-//	                 save(ExternalResourceProvider{ auths:[{hmacKeyId}], url, externalServiceId, name })
-//	               → single(saved)
-//	update(id,body) = findById-or-404 → setId/Name/Url(body) → save → single(saved)
+//	create(body) = resolve the external service by body.externalServiceId (500 if absent),
+//	               generate an HMAC key ("Generated for external service provider <name> <url>"),
+//	               then persist the provider { auths:[{hmacKeyId}], url, externalServiceId, name }
+//	               and return the saved doc
+//	update(id,body) = load-or-404 → overwrite name + url from the body → save → return the saved doc
 //	                  [externalServiceId + auths are PRESERVED from the stored doc]
-//	delete(id)      = findById-or-404 → each auth → hmacService.delete(hmacKeyId) → repository.delete
-//	                  [returns void → 200 with an EMPTY body]
+//	delete(id)      = load-or-404 → delete each auth's HMAC key → delete the provider
+//	                  [returns a 200 with an EMPTY body]
 //	test/billing-resources       = resolve provider/externalService/project/billingProfile then
-//	                               providerService.getBillingResources(...) — a LIVE HTTP call to the
+//	                               fetch the billing resources — a LIVE HTTP call to the
 //	                               registered external billing provider (HMAC SigV4). [external integration point]
-//	test/billing-resource-types  = providerService.getBillingResourceTypes(...) — same LIVE HTTP. [external integration point]
+//	test/billing-resource-types  = fetch the billing resource types — same LIVE HTTP. [external integration point]
 //
-// HmacKey.generate is LOCAL crypto (md5/sha1 of a random UUID, the hmac_keys collection) — NOT a cloud
+// generateHmacKey is LOCAL crypto (md5/sha1 of a random UUID, the hmac_keys collection) — NOT a cloud
 // call — so create persists the hmac key + the provider doc faithfully via the crud.go helpers.
 // The two /test/** endpoints reach OUT to the external resource-provider's own HTTP API (the billing
 // catalog) over an HMAC-signed request; that is an external action and is an external integration
@@ -81,13 +80,12 @@ type externalResourceProviderReq struct {
 	Name              string `json:"name"`
 }
 
-// serviceNotFound is ServiceNotFoundException("Service not found: %s") — a plain runtime error
-// (NOT an HttpError), so the default handler maps it to HTTP 500 with that message.
+// serviceNotFound reports "Service not found: %s" as an HTTP 500 (the id resolved to no service).
 func serviceNotFound(id string) *httpx.HTTPError {
 	return httpx.NewError(http.StatusInternalServerError, http.StatusInternalServerError, fmt.Sprintf("Service not found: %s", id))
 }
 
-// erpNotFound is notFound("External resource provider with id %s not found").
+// erpNotFound returns a 404 "External resource provider with id %s not found".
 func erpNotFound(id string) *httpx.HTTPError {
 	return httpx.NotFound(fmt.Sprintf("External resource provider with id %s not found", id))
 }
@@ -127,9 +125,9 @@ func hexSHA1(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// erpCreate handles createExternalResourceProvider: resolve externalService (platformService.get) →
-// 500 ServiceNotFoundException if absent → generate an HMAC key → persist the provider with
-// auths=[{hmacKeyId}] → single(saved). ADMIN_SERVICE_MANAGE.
+// erpCreate creates an external resource provider: resolve the external service (500 if absent) →
+// generate an HMAC key → persist the provider with
+// auths=[{hmacKeyId}] → return the saved doc. ADMIN_SERVICE_MANAGE.
 func (h *Handler) erpCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, erpManagePerm) {
 		return
@@ -139,9 +137,8 @@ func (h *Handler) erpCreate(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
 		return
 	}
-	// platformService.get(externalServiceId) → ServiceNotFoundException (500) when the service doc
-	// is absent. The lookup is a plain datastore read (the decrypt step it also does has no visible
-	// effect — we only need the doc's existence + its id).
+	// Load the external service by id → 500 when the service doc is absent. The lookup is a plain
+	// datastore read (we only need the doc's existence + its id).
 	svc, err := h.repo.FindDoc(r.Context(), erpServiceColl, req.ExternalServiceID)
 	if httpx.WriteError(w, err) {
 		return
@@ -152,12 +149,12 @@ func (h *Handler) erpCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	externalServiceID := stringID(svc["_id"])
 
-	// hmacService.generate(...) — local crypto, persisted to hmac_keys.
+	// Generate the HMAC key — local crypto, persisted to hmac_keys.
 	hmacDoc, hmacKeyID := generateHmacKey(fmt.Sprintf("Generated for external service provider %s %s", req.Name, req.URL))
 	if _, err := h.repo.InsertHmacKey(r.Context(), hmacDoc); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): hmacService.generate is audited (CREATE)
+	// TODO(audit): write a CREATE audit event for the generated HMAC key.
 
 	// Build the stored provider: id is generated
 	// by the datastore; only auths/url/externalServiceId/name are set (a null id is omitted).
@@ -171,12 +168,12 @@ func (h *Handler) erpCreate(w http.ResponseWriter, r *http.Request) {
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(provider, CREATE, PLATFORM)
+	// TODO(audit): write an admin CREATE audit event for the provider.
 	httpx.OK(w, shapeDoc(saved))
 }
 
-// erpUpdate handles updateExternalResourceProvider: findById-or-404 → set id/name/url from the body
-// (externalServiceId + auths PRESERVED) → save → single. ADMIN_SERVICE_MANAGE.
+// erpUpdate updates an external resource provider: load-or-404 → overwrite name + url from the body
+// (externalServiceId + auths PRESERVED) → save → return the saved doc. ADMIN_SERVICE_MANAGE.
 func (h *Handler) erpUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, erpManagePerm) {
 		return
@@ -196,21 +193,21 @@ func (h *Handler) erpUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := maps.Clone(existing)
-	// Only name + url are overwritten (setId(id) is a no-op on the persisted _id); externalServiceId
+	// Only name + url are overwritten (the persisted _id is unchanged); externalServiceId
 	// and auths are kept from the stored doc.
 	existing["name"] = req.Name
 	existing["url"] = req.URL
 	if err := h.repo.ReplaceDoc(r.Context(), erpCollection, id, existing); httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE audit: field-level diff (middleware computes diffSnapshots(before, after)).
+	// UPDATE audit: record the before/after snapshots; the middleware emits the field-level diff.
 	after, _ := h.repo.FindDoc(r.Context(), erpCollection, id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// erpDelete handles deleteExternalResourceProvider: findById-or-404 → delete each auth's hmac key →
-// delete the provider. Returns void → a 200 with an EMPTY body (no envelope).
+// erpDelete deletes an external resource provider: load-or-404 → delete each auth's HMAC key →
+// delete the provider. Returns a 200 with an EMPTY body (no envelope).
 // ADMIN_SERVICE_MANAGE.
 func (h *Handler) erpDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, erpManagePerm) {
@@ -225,19 +222,18 @@ func (h *Handler) erpDelete(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, erpNotFound(id))
 		return
 	}
-	// hmacService.delete(hmacKeyId) for each auth — a datastore delete on hmac_keys (delete is a silent
-	// no-op if the key is absent, matching findById(...).ifPresent).
+	// Delete each auth's HMAC key from hmac_keys — a silent no-op if the key is already absent.
 	for _, hmacKeyID := range erpAuthHmacKeyIDs(existing["auths"]) {
 		if _, err := h.repo.DeleteHmacKey(r.Context(), hmacKeyID); httpx.WriteError(w, err) {
 			return
 		}
-		// TODO(audit): hmacService.delete is auditAdmin(key, DELETE, PLATFORM)
+		// TODO(audit): write an admin DELETE audit event for the removed HMAC key.
 	}
 	if _, err := h.repo.DeleteDoc(r.Context(), erpCollection, id); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(provider, DELETE, PLATFORM)
-	// the method returns void → 200 with an empty body (no envelope).
+	// TODO(audit): write an admin DELETE audit event for the provider.
+	// respond 200 with an empty body (no envelope).
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -270,11 +266,11 @@ func erpAuthHmacKeyIDs(v any) []string {
 	return out
 }
 
-// erpTestBillingResources handles testBillingResources: resolves the provider/externalService/project/
-// billingProfile and then calls providerService.getBillingResources(...) — a LIVE HMAC-signed HTTP
+// erpTestBillingResources fetches the provider's billing resources: resolves the
+// provider/externalService/project/billingProfile and then makes a LIVE HMAC-signed HTTP
 // call to the registered external billing provider's catalog API. That external action is not wired:
 // the provider must first be resolved (404 if the id is unknown — done before the call),
-// then the cloud/external probe is NOT executed and we return 501. ADMIN_SERVICE_READ.
+// then the external probe is NOT executed and we return 501. ADMIN_SERVICE_READ.
 func (h *Handler) erpTestBillingResources(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, erpReadPerm) {
 		return
@@ -288,15 +284,15 @@ func (h *Handler) erpTestBillingResources(w http.ResponseWriter, r *http.Request
 		httpx.WriteError(w, erpNotFound(id))
 		return
 	}
-	// External integration point: providerService.getBillingResources(billingContext, serviceContext) — fans out an
+	// External integration point: fetch the billing resources — fans out an
 	// HMAC-signed POST to the external resource-provider's /billing_resources API. Purely external;
 	// not wired this pass.
 	httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
 		"getBillingResources not implemented"))
 }
 
-// erpTestBillingResourceTypes handles testBillingResourceTypes: resolves the provider/externalService/
-// project and then calls providerService.getBillingResourceTypes(...) — a LIVE HMAC-signed HTTP call
+// erpTestBillingResourceTypes fetches the provider's billing resource types: resolves the
+// provider/externalService/project and then makes a LIVE HMAC-signed HTTP call
 // to the external provider's /billing_resources/types API. Not wired (resolve-then-501). ADMIN_SERVICE_READ.
 func (h *Handler) erpTestBillingResourceTypes(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, erpReadPerm) {
@@ -311,7 +307,7 @@ func (h *Handler) erpTestBillingResourceTypes(w http.ResponseWriter, r *http.Req
 		httpx.WriteError(w, erpNotFound(id))
 		return
 	}
-	// External integration point: providerService.getBillingResourceTypes(serviceContext, true, null) — HMAC-signed POST to
+	// External integration point: fetch the billing resource types — HMAC-signed POST to
 	// the external provider's /billing_resources/types API. Purely external; not wired this pass.
 	httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
 		"getBillingResourceTypes not implemented"))

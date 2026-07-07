@@ -15,30 +15,27 @@ import (
 // previously registered in handler.go (the `/price-plan/**` admin routes are a DIFFERENT surface).
 //
 // Endpoints:
-//   - create:               validate(name, pricePlanId) → save → single.   ADMIN_PRICE_PLAN_MANAGE
-//   - get:                  findById → 404 "Price adjustment rule not found".ADMIN_PRICE_PLAN_READ
-//   - update:               validate(name, pricePlanId) FIRST → get(404) →
+//   - create:               validate name + pricePlanId → save → return it. requires manage
+//   - get:                  load by id → 404 "Price adjustment rule not found". requires read
+//   - update:               validate name + pricePlanId FIRST → load (404) →
 //                           overwrite 5 fields (name/description/targets/tiers/enabled) → save.
-//                                                                            ADMIN_PRICE_PLAN_MANAGE
-//   - delete:               deleteById (NO 404 check) → success.            ADMIN_PRICE_PLAN_MANAGE
-//   - getAllByPricePlanId:  findByPricePlanId → list.                       ADMIN_PRICE_PLAN_READ
-//   - getRuleUsage:         get(404) → sum BillAdjustment.amount over OPEN bills carrying this rule
-//                           → PriceAdjustmentRuleUsage. Not wired (money aggregation, see below).
-//                                                                            ADMIN_PRICE_PLAN_READ
+//                                                                            requires manage
+//   - delete:               delete by id (NO 404 check) → success.          requires manage
+//   - by-price-plan:        list all rules for the plan.                    requires read
+//   - usage:                load (404) → sum adjustment amounts over OPEN bills carrying this rule
+//                           → the usage DTO.                                requires read
 //
-// The admin endpoints return the RAW PriceAdjustmentRule document (CustomHttpResponse.single /
-// .list), NOT a client DTO. The raw JSON shape (id not _id, money startAmount/value as a JSON number
-// backed by a decimal.Decimal stored as a decimal string in jsonb, nulls omitted, no _class) is produced by the typed priceAdjustmentRule
-// domain in priceadjustmentrule_repo.go.
+// The admin endpoints return the RAW price-adjustment-rule document, NOT a client DTO. The raw JSON
+// shape (id not _id, money startAmount/value as a JSON number backed by a decimal.Decimal stored as
+// a decimal string in jsonb, nulls omitted) is produced by the typed priceAdjustmentRule domain in
+// priceadjustmentrule_repo.go.
 //
 // create/update write audit events; delete has no audit. Deferred this
 // pass (// TODO(audit)); state + response are faithful.
 //
-// ⚠ getRuleUsage is NOT WIRED: it sums BillAdjustment money (BigDecimal) across every OPEN bill whose
-// adjustments reference this rule. That is a money aggregation over the bill collection + the
-// golden-tested pricing/bill layer — not a simple persisted state read — so it returns 501 rather
-// than emit a guessed/duplicated sum. The 404-when-the-rule-is-absent branch still runs first
-// (faithful), so a missing rule returns the exact 404; an existing rule returns 501.
+// usage sums adjustment money across every OPEN bill whose adjustments reference this rule, via the
+// pgdoc decimal codec. The 404-when-the-rule-is-absent branch runs first, so a missing rule returns
+// the exact 404.
 
 const (
 	parManagePerm     = "admin:price_plan:manage"
@@ -49,7 +46,7 @@ const (
 	parPlanIDRequired = "Price plan ID must not be null"
 )
 
-// routePriceAdjustmentRule registers the PriceAdjustmentRuleController routes. chi allows only ONE
+// routePriceAdjustmentRule registers the price-adjustment-rule routes. chi allows only ONE
 // param name at a given path position, so the two single-segment wildcard routes (`/{id}` and
 // `/{id}/usage`) share the name `id`; the literal `price-plan` segment is a sibling and routes ahead
 // of the wildcard with no conflict.
@@ -105,7 +102,7 @@ func (req priceAdjustmentRuleReq) toDomain() priceAdjustmentRule {
 	}
 }
 
-// priceAdjustmentRuleCreate handles create(): validate → save → single(saved). ADMIN_PRICE_PLAN_MANAGE.
+// priceAdjustmentRuleCreate validates the rule, saves it, and returns the saved rule. Requires manage permission.
 func (h *Handler) priceAdjustmentRuleCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, parManagePerm) {
 		return
@@ -123,11 +120,11 @@ func (h *Handler) priceAdjustmentRuleCreate(w http.ResponseWriter, r *http.Reque
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): CREATE audit — auditService.auditAdmin(saved, CREATE, PLATFORM)
+	// TODO(audit): write an admin audit event when a rule is created.
 	httpx.OK(w, priceAdjustmentRuleToDto(saved))
 }
 
-// priceAdjustmentRuleGet handles get(): findById → single, or 404. ADMIN_PRICE_PLAN_READ.
+// priceAdjustmentRuleGet loads a rule by id and returns it, or 404. Requires read permission.
 func (h *Handler) priceAdjustmentRuleGet(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, parReadPerm) {
 		return
@@ -143,10 +140,10 @@ func (h *Handler) priceAdjustmentRuleGet(w http.ResponseWriter, r *http.Request)
 	httpx.OK(w, priceAdjustmentRuleToDto(rule))
 }
 
-// priceAdjustmentRuleUpdate handles update(): validate FIRST → get(404) → overwrite the 5 mutable
-// fields (name/description/targets/tiers/enabled) → save → single. pricePlanId is NOT copied by the
-// update (it is immutable after create), so the existing pricePlanId is preserved.
-// ADMIN_PRICE_PLAN_MANAGE.
+// priceAdjustmentRuleUpdate validates FIRST, loads the rule (404 if absent), overwrites the 5
+// mutable fields (name/description/targets/tiers/enabled), saves, and returns it. pricePlanId is
+// NOT copied by the update (it is immutable after create), so the existing pricePlanId is
+// preserved. Requires manage permission.
 func (h *Handler) priceAdjustmentRuleUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, parManagePerm) {
 		return
@@ -171,8 +168,7 @@ func (h *Handler) priceAdjustmentRuleUpdate(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	before, _ := h.repo.FindDoc(r.Context(), parCollection, id) // raw pre-mutation snapshot for the audit diff
-	// Overwrite exactly the 5 fields the update copies (setName/setDescription/setTargets/
-	// setTiers/setEnabled); id + pricePlanId are preserved.
+	// Overwrite exactly the 5 mutable fields; id + pricePlanId are preserved.
 	existing.Name = req.Name
 	existing.Description = req.Description
 	existing.Targets = req.Targets
@@ -181,15 +177,14 @@ func (h *Handler) priceAdjustmentRuleUpdate(w http.ResponseWriter, r *http.Reque
 	if err := h.repo.ReplacePriceAdjustmentRule(r.Context(), parCollection, id, *existing); httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE audit: field-level diff (middleware computes diffSnapshots(before, after)).
+	// Record an audit event with a field-level diff of the before/after documents.
 	after, _ := h.repo.FindDoc(r.Context(), parCollection, id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, priceAdjustmentRuleToDto(existing))
 }
 
-// priceAdjustmentRuleDelete handles delete(): deleteById → success("Successful operation"). The
-// delete calls deleteById with NO existence check (a missing id is a silent no-op → still 200).
-// ADMIN_PRICE_PLAN_MANAGE.
+// priceAdjustmentRuleDelete deletes a rule by id and returns success ("Successful operation"). There
+// is NO existence check (a missing id is a silent no-op → still 200). Requires manage permission.
 func (h *Handler) priceAdjustmentRuleDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, parManagePerm) {
 		return
@@ -200,8 +195,8 @@ func (h *Handler) priceAdjustmentRuleDelete(w http.ResponseWriter, r *http.Reque
 	httpx.OK(w, "Successful operation")
 }
 
-// priceAdjustmentRulesByPricePlan handles getRulesByPricePlanId(): getAllByPricePlanId
-// (findByPricePlanId, ALL — not only enabled) → list. ADMIN_PRICE_PLAN_READ.
+// priceAdjustmentRulesByPricePlan lists all rules for a price plan (every rule, not only the
+// enabled ones) → list envelope. Requires read permission.
 func (h *Handler) priceAdjustmentRulesByPricePlan(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, parReadPerm) {
 		return
@@ -213,10 +208,10 @@ func (h *Handler) priceAdjustmentRulesByPricePlan(w http.ResponseWriter, r *http
 	httpx.List(w, rules)
 }
 
-// priceAdjustmentRuleUsage handles getRuleUsage(): get(404) → Σ BillAdjustment.amount across every
-// OPEN bill carrying an adjustment for this rule → PriceAdjustmentRuleUsage {ruleId, ruleName,
-// openBillsCount, totalAdjustmentsAmount}. Pure datastore aggregation via the pgdoc decimal codec
-// (money stored as a decimal string in jsonb, summed with decimal.Decimal arithmetic). ADMIN_PRICE_PLAN_READ.
+// priceAdjustmentRuleUsage loads the rule (404 if absent), then sums adjustment amounts across every
+// OPEN bill carrying an adjustment for this rule → {ruleId, ruleName, openBillsCount,
+// totalAdjustmentsAmount}. The sum runs through the pgdoc decimal codec (money stored as a decimal
+// string in jsonb, summed with decimal.Decimal arithmetic). Requires read permission.
 func (h *Handler) priceAdjustmentRuleUsage(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, parReadPerm) {
 		return
@@ -227,7 +222,7 @@ func (h *Handler) priceAdjustmentRuleUsage(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if rule == nil {
-		// PriceAdjustmentRuleService.getRuleUsage calls get(ruleId) first → 404 when absent.
+		// Load the rule first → 404 when absent.
 		httpx.WriteError(w, httpx.NotFound(parNotFoundMsg))
 		return
 	}

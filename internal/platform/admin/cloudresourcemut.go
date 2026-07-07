@@ -21,13 +21,13 @@ import (
 // cloudResourcesByProject / cloudResourcesAll / the public-networks emptyCloudList stub) and is
 // intentionally NOT re-registered here.
 //
-// Call graph:
+// Flow:
 //
-//	sync(id)   = syncCloudResource(id)  [audited SYNC PROJECT]
-//	           = getById → resolve ES + project → re-fetch the live OpenStack object → createOrUpdate
-//	             the cache → return the refreshed entity.
-//	delete(id) = get(id)-or-404 → delete(rc, id) — the REAL OpenStack delete via
-//	             the provider write path + archive to cloudResourceHistory → 202 Accepted (empty).
+//	sync(id)   = look up the cached resource by id → resolve its external service + project →
+//	             re-fetch the live OpenStack object → upsert the cache → return the refreshed entity
+//	             (audited SYNC PROJECT).
+//	delete(id) = look up by id (404 if absent) → the REAL OpenStack delete via the provider write
+//	             path + archive to cloudResourceHistory → 202 Accepted (empty).
 //
 // Both run LIVE here through the handler's own cloud deps (esSvc + cloudNew + cloud repo — no extra
 // wiring). sync reuses syncjob.ProvidersFor + providers.Reconcile scoped to the resource's TYPE +
@@ -54,10 +54,10 @@ func cloudResourceIDNotFound(id string) *httpx.HTTPError {
 	return httpx.NotFound(fmt.Sprintf("CloudResource with id %s not found", id))
 }
 
-// tenantClientFor builds a CloudClient scoped the way the ServiceContext resolves for a cached
-// resource: the resource's externalService + region, admin-scoped to the owning project's
-// externalProjectId (falling back to plain admin scope for identity resources with no project).
-// Returns (nil, es, extProjID, nil) when the factory is unwired (tests).
+// tenantClientFor builds a CloudClient scoped for a cached resource: the resource's
+// externalService + region, admin-scoped to the owning project's externalProjectId (falling back
+// to plain admin scope for identity resources with no project). Returns (nil, es, extProjID, nil)
+// when the factory is unwired (tests).
 func (h *Handler) tenantClientFor(w http.ResponseWriter, r *http.Request, res *cloud.CloudResource) (*client.Client, string, bool) {
 	es, ok := h.externalServiceOr404(w, r, res.ServiceID)
 	if !ok {
@@ -103,9 +103,9 @@ func projectExternalID(proj pgdoc.M, serviceID string) string {
 	return ""
 }
 
-// cloudResourceSync handles syncCloudResource(id): resolve the cached resource + its service +
-// project, re-fetch from the live region and upsert the cache, return the refreshed doc (single).
-// Implemented as a TYPE+project-scoped Reconcile (see file header).
+// cloudResourceSync resolves the cached resource + its service + project, re-fetches from the
+// live region and upserts the cache, then returns the refreshed doc (single). Implemented as a
+// TYPE+project-scoped Reconcile (see file header).
 func (h *Handler) cloudResourceSync(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, cloudResourceManagePerm) {
 		return
@@ -116,7 +116,7 @@ func (h *Handler) cloudResourceSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if res == nil {
-		// getById → the same cloudResourceIdNotFound 404.
+		// Not in the cache → the cloudResourceIDNotFound 404.
 		httpx.WriteError(w, cloudResourceIDNotFound(id))
 		return
 	}
@@ -145,13 +145,13 @@ func (h *Handler) cloudResourceSync(w http.ResponseWriter, r *http.Request) {
 	if _, err := providers.Reconcile(r.Context(), prov, h.cloud, res.ServiceID, time.Now().UTC()); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): SYNC PROJECT audit event.
+	// TODO(audit): write a SYNC PROJECT audit event.
 	fresh, err := h.cloud.FindByID(r.Context(), id)
 	if httpx.WriteError(w, err) {
 		return
 	}
 	if fresh == nil {
-		// The live object vanished → the reconcile archived it; the trailing getById throws the
+		// The live object vanished → the reconcile archived it; the trailing lookup returns the
 		// same not-found.
 		httpx.WriteError(w, cloudResourceIDNotFound(id))
 		return
@@ -159,7 +159,7 @@ func (h *Handler) cloudResourceSync(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, fresh)
 }
 
-// cloudResourceDelete handles deleteCloudResource: get(id)-or-404 → delete — the REAL
+// cloudResourceDelete looks up the resource by id (404 if absent), then performs the REAL
 // OpenStack delete through the provider write path (WriteService.Delete also archives the cache
 // row into cloudResourceHistory) → 202 Accepted with an empty body.
 func (h *Handler) cloudResourceDelete(w http.ResponseWriter, r *http.Request) {
@@ -167,7 +167,7 @@ func (h *Handler) cloudResourceDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	// get(id): cloudResourceRepository.findById(id).orElseThrow(notFound(...)).
+	// Look up by id, or 404 if absent.
 	res, err := h.cloud.FindByID(r.Context(), id)
 	if httpx.WriteError(w, err) {
 		return
@@ -190,6 +190,6 @@ func (h *Handler) cloudResourceDelete(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.NewError(http.StatusInternalServerError, http.StatusInternalServerError, err.Error()))
 		return
 	}
-	// TODO(audit): auditAdmin(cloudResource, DELETE, PROJECT).
+	// TODO(audit): write an admin audit event when a cloud resource is deleted.
 	w.WriteHeader(http.StatusAccepted)
 }

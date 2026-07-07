@@ -1,7 +1,7 @@
 package admin
 
 // txn_reads.go implements the transaction admin GET reads filtered by paymentGatewayId
-// (getByPaymentGatewayId across the three transaction types) + the live-gateway sync (not wired).
+// across the three transaction types + the live-gateway sync (not wired).
 
 import (
 	"net/http"
@@ -13,7 +13,7 @@ import (
 )
 
 // txnByGateway lists a collection's transactions filtered by paymentGatewayId (the {id} path param
-// here is the paymentGatewayId, per getByPaymentGatewayId). Money is a decimal.Decimal stored as a decimal string.
+// here is the paymentGatewayId). Money is a decimal.Decimal stored as a decimal string.
 // Gated ADMIN_TRANSACTION_READ.
 func (h *Handler) txnByGateway(collection string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -35,11 +35,10 @@ func (h *Handler) txnByGateway(collection string) http.HandlerFunc {
 	}
 }
 
-// accountCreditTxnSync handles syncTransaction — which is
-// LITERALLY addFundsService.processAddFunds(transactionId): re-drive the gateway confirm (Stripe PI
-// retrieve / BankTransfer doc dispatch) and return the refreshed txn. Gated ADMIN_TRANSACTION_MANAGE
-// (the old read-gate here was a bug — fixed dev232). h.refund unwired (tests) → 501
-// after the faithful 404.
+// accountCreditTxnSync re-drives the add-funds flow for a transaction: it re-runs the gateway
+// confirm (Stripe PI retrieve / BankTransfer doc dispatch) and returns the refreshed txn. Gated
+// ADMIN_TRANSACTION_MANAGE (an earlier read-gate here was a bug — fixed dev232). h.refund unwired
+// (tests) → 501 after the 404.
 func (h *Handler) accountCreditTxnSync(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:transaction:manage") {
 		return

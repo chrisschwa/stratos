@@ -17,13 +17,13 @@ import (
 
 // instancemetadata.go serves the MUTATIONS of the instance-metadata-options surface
 // (/api/v1/admin/instance-metadata-options). The bare list read
-// (GET, listAll) is ALREADY registered in handler.go (h.listRaw on collection
+// (GET) is ALREADY registered in handler.go (h.listRaw on collection
 // "instanceMetadataOption") and is intentionally NOT re-registered here; the by-id read (GET /{id})
 // is NOT yet registered, so it is added here (faithful 404 path).
 //
-// All endpoints gate on ADMIN_INSTANCE_METADATA_MANAGE. The service writes are pure datastore
-// (no identity/external side effects), so the whole surface is in-scope and handled
-// faithfully via the crud.go helpers. create/update/disable/permanentDelete/reactivate emit
+// All endpoints gate on the admin:instance_metadata:manage permission. The writes are pure
+// datastore (no identity/external side effects), so the whole surface is in-scope and handled
+// faithfully via the crud.go helpers. create/update/disable/permanent-delete/reactivate emit
 // audit events — deferred this pass (TODO(audit));
 // the persisted state + response shape are faithful, which is what the admin UI exercises.
 
@@ -76,8 +76,8 @@ type instanceMetadataOptionReq struct {
 	ShowInline   bool                     `json:"showInline"`
 }
 
-// validateTypeAndShape runs validateType + validatePredefinedValues +
-// validateNumericRange + validateRegionsRequireServiceIds, in the same order/branches.
+// validateTypeAndShape checks the type is present, runs validatePredefinedValues or
+// validateNumericRange per type, then validateRegionsRequireServiceIds.
 func (req instanceMetadataOptionReq) validateTypeAndShape() *httpx.HTTPError {
 	t := req.Type
 	if t == nil {
@@ -150,7 +150,7 @@ func (req instanceMetadataOptionReq) validateRegionsRequireServiceIds() *httpx.H
 	return nil
 }
 
-// validateInstanceMetadataKey runs validateKey: required + not a
+// validateInstanceMetadataKey validates the key: required + not a
 // reserved prefix (case-insensitive).
 func validateInstanceMetadataKey(key string) *httpx.HTTPError {
 	if strings.TrimSpace(key) == "" {
@@ -165,8 +165,8 @@ func validateInstanceMetadataKey(key string) *httpx.HTTPError {
 	return nil
 }
 
-// validateInstanceMetadataKeyUniqueness runs validateKeyUniqueness: an active option with the same
-// key (excluding excludeId when set) → 400. The check is enabled==true and key match.
+// validateInstanceMetadataKeyUniqueness rejects (400) an active option with the same
+// key (excluding excludeId when set). The check is enabled==true and key match.
 func (h *Handler) validateInstanceMetadataKeyUniqueness(r *http.Request, key, excludeID string) (*httpx.HTTPError, error) {
 	exists, err := h.repo.InstanceMetadataKeyEnabledExists(r.Context(), key, excludeID)
 	if err != nil {
@@ -230,8 +230,8 @@ func (req instanceMetadataOptionReq) mutableDoc() pgdoc.M {
 	return d
 }
 
-// instanceMetadataCreate handles create(): validateKey → validateType → validateRegions →
-// validateKeyUniqueness(key, null) → id=null, enabled=true, createdAt=now → save → single(saved).
+// instanceMetadataCreate validates the key, type/shape and key-uniqueness, then stores a new option
+// (enabled=true, createdAt=now) and returns the saved doc.
 func (h *Handler) instanceMetadataCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, instanceMetadataPerm) {
 		return
@@ -262,12 +262,12 @@ func (h *Handler) instanceMetadataCreate(w http.ResponseWriter, r *http.Request)
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): CREATE INSTANCE_METADATA_OPTION audit event
+	// TODO(audit): write a CREATE INSTANCE_METADATA_OPTION audit event.
 	httpx.OK(w, shapeDoc(saved))
 }
 
-// instanceMetadataGetByID handles getById(): findById-or-404 → single. (service.getById; the
-// GET /{id} read — not previously registered.)
+// instanceMetadataGetByID loads an option by id; 404 if absent. (The GET /{id} read — not
+// previously registered.)
 func (h *Handler) instanceMetadataGetByID(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, instanceMetadataPerm) {
 		return
@@ -283,9 +283,9 @@ func (h *Handler) instanceMetadataGetByID(w http.ResponseWriter, r *http.Request
 	httpx.OK(w, shapeDoc(doc))
 }
 
-// instanceMetadataUpdate handles update(): getById-or-404 → if key changed validateKey +
-// validateKeyUniqueness(key, id) → validateType → validateRegions → overwrite the 10 mutable fields
-// → updatedAt=now → save → single.
+// instanceMetadataUpdate loads the option (404 if absent); if the key changed, re-validates the key
+// and its uniqueness; validates type/shape; overwrites the 10 mutable fields; sets updatedAt=now;
+// saves and returns it.
 func (h *Handler) instanceMetadataUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, instanceMetadataPerm) {
 		return
@@ -305,7 +305,7 @@ func (h *Handler) instanceMetadataUpdate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	before := maps.Clone(existing)
-	// if (!existing.getKey().equals(update.getKey())) { validateKey; validateKeyUniqueness }.
+	// Only when the key changed: re-validate the key and its uniqueness.
 	existingKey, _ := existing["key"].(string)
 	if existingKey != req.Key {
 		if herr := validateInstanceMetadataKey(req.Key); herr != nil {
@@ -323,7 +323,7 @@ func (h *Handler) instanceMetadataUpdate(w http.ResponseWriter, r *http.Request)
 		httpx.WriteError(w, herr)
 		return
 	}
-	// Overwrite the 10 mutable setters (key, displayName, description, type, options, numericRange,
+	// Overwrite the 10 mutable fields (key, displayName, description, type, options, numericRange,
 	// serviceIds, regions, userEditable, showInline) + updatedAt. Drop the old values first so an
 	// omitted/null field becomes absent (dropped), following the menuUpdate reference pattern.
 	for _, k := range []string{"key", "displayName", "description", "type", "options", "numericRange", "serviceIds", "regions", "userEditable", "showInline"} {
@@ -336,16 +336,16 @@ func (h *Handler) instanceMetadataUpdate(w http.ResponseWriter, r *http.Request)
 	if err := h.repo.ReplaceDoc(r.Context(), instanceMetadataCollection, id, existing); httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE audit: field-level diff (middleware computes diffSnapshots(before, after)).
+	// UPDATE audit: field-level diff (the middleware diffs the before/after snapshots).
 	after, _ := h.repo.FindDoc(r.Context(), instanceMetadataCollection, id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// instanceMetadataDelete handles delete(): ?permanent (default false). permanent=true →
-// permanentDelete (getById-or-404 → if enabled 400 "Cannot permanently delete an active metadata
-// option. Disable it first." else deleteById); else disable (getById-or-404 → enabled=false,
-// disabledAt=now, disabledBy=admin.email → save). Both return 204 No Content.
+// instanceMetadataDelete handles delete with ?permanent (default false). permanent=true →
+// hard delete (load-or-404 → if enabled 400 "Cannot permanently delete an active metadata
+// option. Disable it first." else delete by id); else soft-disable (load-or-404 → enabled=false,
+// disabledAt=now, disabledBy=admin email → save). Both return 204 No Content.
 func (h *Handler) instanceMetadataDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, instanceMetadataPerm) {
 		return
@@ -363,7 +363,7 @@ func (h *Handler) instanceMetadataDelete(w http.ResponseWriter, r *http.Request)
 	}
 
 	if permanent {
-		// permanentDelete: enabled → 400; else deleteById.
+		// hard delete: enabled → 400; else delete by id.
 		enabled, _ := existing["enabled"].(bool)
 		if enabled {
 			httpx.WriteError(w, httpx.BadRequest("Cannot permanently delete an active metadata option. Disable it first."))
@@ -372,7 +372,7 @@ func (h *Handler) instanceMetadataDelete(w http.ResponseWriter, r *http.Request)
 		if _, err := h.repo.DeleteDoc(r.Context(), instanceMetadataCollection, id); httpx.WriteError(w, err) {
 			return
 		}
-		// TODO(audit): auditService.auditAdmin(option, DELETE, PLATFORM)
+		// TODO(audit): write an admin audit event when an option is permanently deleted.
 	} else {
 		// disable: enabled=false, disabledAt=now, disabledBy=admin email.
 		email := httpx.RC(r.Context()).Email
@@ -383,14 +383,14 @@ func (h *Handler) instanceMetadataDelete(w http.ResponseWriter, r *http.Request)
 		}); httpx.WriteError(w, err) {
 			return
 		}
-		// TODO(audit): auditService.auditAdmin(option, DELETE, PLATFORM)
+		// TODO(audit): write an admin audit event when an option is disabled.
 	}
 	// delete returns 204, no body.
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// instanceMetadataReactivate handles reactivate(): getById-or-404 → validateKeyUniqueness(key, id) →
-// enabled=true, disabledAt=null, disabledBy=null → save → single.
+// instanceMetadataReactivate loads the option (404 if absent), re-checks key uniqueness, then sets
+// enabled=true and clears disabledAt/disabledBy → save → returns it.
 func (h *Handler) instanceMetadataReactivate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, instanceMetadataPerm) {
 		return
@@ -411,14 +411,14 @@ func (h *Handler) instanceMetadataReactivate(w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, herr)
 		return
 	}
-	// enabled=true; disabledAt=null, disabledBy=null (cleared). $set enabled, $unset the disabled-*
-	// fields so they are absent (nulls are dropped anyway).
+	// enabled=true; disabledAt/disabledBy cleared. Set enabled and remove the disabled-* fields so
+	// they are absent (nulls are dropped anyway).
 	existing["enabled"] = true
 	delete(existing, "disabledAt")
 	delete(existing, "disabledBy")
 	if err := h.repo.ReplaceDoc(r.Context(), instanceMetadataCollection, id, existing); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): UPDATE INSTANCE_METADATA_OPTION audit event
+	// TODO(audit): write an UPDATE INSTANCE_METADATA_OPTION audit event.
 	httpx.OK(w, shapeDoc(existing))
 }

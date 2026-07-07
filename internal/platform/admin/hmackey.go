@@ -16,13 +16,13 @@ import (
 )
 
 // hmackey.go serves the hmac-keys surface (/api/v1/admin/hmac-keys). The bare GET list
-// (findAll) is already registered in handler.go via listRaw("admin:hmac_key:manage", "hmac_keys");
+// is already registered in handler.go via listRaw("admin:hmac_key:manage", "hmac_keys");
 // this file adds the two endpoints it does NOT cover:
-//   - GET    /hmac-keys/{keyId}  retrieve(keyId): findById → single, or 404 "HMAC Key Not Found".
-//   - DELETE /hmac-keys/{keyId}  delete(keyId):  findById → if present audit+delete; ABSENT is a
-//     SILENT no-op (ifPresent — NO 404). Returns `void` → HTTP 200, empty body.
+//   - GET    /hmac-keys/{keyId}  load by id → single, or 404 "HMAC Key Not Found".
+//   - DELETE /hmac-keys/{keyId}  load by id → if present audit+delete; an absent key is a
+//     SILENT no-op (NO 404). Returns HTTP 200 with an empty body.
 //
-// All endpoints gate on ADMIN_HMAC_KEY_MANAGE. The HmacKey domain stores its String id (e.g.
+// All endpoints gate on the admin:hmac_key:manage permission. The HmacKey domain stores its String id (e.g.
 // "pk<md5>") in `_id` and serializes description/createdAt/updatedAt → shapeDoc (_id→id, drop
 // _class) shapes the response; secretKey is STRIPPED from the by-id read (as from the list) so the
 // secret half of the pair never reaches the browser — it is served in full only once, at generate
@@ -44,7 +44,7 @@ func (h *Handler) routeHmacKey(r chi.Router) {
 	r.Delete("/hmac-keys/{id}", h.hmacKeyDelete)
 }
 
-// hmacKeyGenerate mints an Admin-API SigV4 key pair (HmacKeyService.generate, previously
+// hmacKeyGenerate mints an Admin-API SigV4 key pair (previously
 // only reachable via the operator shell command / mgmt gen-hmac-key). Returns the secret ONCE —
 // it is stored verbatim and never re-served in full by the list/get reads. Body {description?}.
 func (h *Handler) hmacKeyGenerate(w http.ResponseWriter, r *http.Request) {
@@ -60,9 +60,9 @@ func (h *Handler) hmacKeyGenerate(w http.ResponseWriter, r *http.Request) {
 	id := "pk" + hex.EncodeToString(m[:])
 	secret := "sk" + hex.EncodeToString(s[:])
 	now := time.Now().UTC()
-	// purpose:"admin-api" marks this as an Admin-API / MCP credential; the SigV4 verifier
-	// (hmacLookup) only resolves admin-api-purpose keys, so provider keys (erpCreate, which do NOT
-	// set purpose) can never authenticate to the Admin API.
+	// purpose:"admin-api" marks this as an Admin-API / MCP credential; the SigV4 verifier only
+	// resolves admin-api-purpose keys, so provider keys (which do NOT set purpose) can never
+	// authenticate to the Admin API.
 	doc := pgdoc.M{"_id": id, "secretKey": secret, "description": req.Description, "createdAt": now, "purpose": hmacKeyPurposeAdminAPI}
 	if err := h.repo.InsertDocKeepID(r.Context(), hmacKeyCollection, doc); httpx.WriteError(w, err) {
 		return
@@ -71,7 +71,7 @@ func (h *Handler) hmacKeyGenerate(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, map[string]any{"id": id, "secretKey": secret, "description": req.Description, "createdAt": now})
 }
 
-// hmacKeyGet handles retrieve(keyId): findById-or-404 → single. 404 "HMAC Key Not Found".
+// hmacKeyGet loads a single HMAC key by id; 404 "HMAC Key Not Found" if absent.
 func (h *Handler) hmacKeyGet(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, hmacKeyPerm) {
 		return
@@ -91,9 +91,8 @@ func (h *Handler) hmacKeyGet(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, d)
 }
 
-// hmacKeyDelete handles delete(keyId): findById → if present delete (audit). ABSENT = SILENT no-op
-// (findById(id).ifPresent — NO 404). The method returns `void` (no
-// envelope) → HTTP 200 with an empty body.
+// hmacKeyDelete deletes the key by id (auditing) when present. An absent key is a SILENT no-op
+// (NO 404). Returns no envelope → HTTP 200 with an empty body.
 func (h *Handler) hmacKeyDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, hmacKeyPerm) {
 		return
@@ -107,7 +106,7 @@ func (h *Handler) hmacKeyDelete(w http.ResponseWriter, r *http.Request) {
 		if _, err := h.repo.DeleteDoc(r.Context(), hmacKeyCollection, id); httpx.WriteError(w, err) {
 			return
 		}
-		// TODO(audit): auditService.auditAdmin(key, DELETE, PLATFORM)
+		// TODO(audit): write an admin audit event when an HMAC key is deleted.
 	}
-	w.WriteHeader(http.StatusOK) // void → HTTP 200, empty body (found or not)
+	w.WriteHeader(http.StatusOK) // HTTP 200, empty body (found or not)
 }

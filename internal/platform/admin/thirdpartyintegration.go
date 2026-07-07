@@ -29,8 +29,8 @@ import (
 //	POST   /integrations/btcpay/stores     BTCPay store list  (ADMIN_INTEGRATION_READ) — external integration
 //	GET    /integrations/whmcs/{id}        WHMCS details      (ADMIN_INTEGRATION_READ) — external integration
 //
-// create/update/delete also write audit events (ThirdPartyIntegrationAdminService →
-// auditService.auditAdmin) — deferred this pass (// TODO(audit)); the state + response are faithful.
+// create/update/delete should also write admin audit events —
+// deferred this pass (// TODO(audit)); the state + response are faithful.
 
 const (
 	integrationManagePerm = "admin:integration:manage"
@@ -64,13 +64,13 @@ type thirdPartyIntegrationReq struct {
 	Metadata    map[string]any `json:"metadata"`
 }
 
-// integrationCreate handles create (called by the admin service.create):
+// integrationCreate creates an integration:
 //   - name defaults to thirdParty when blank; description defaults to "<thirdParty> Integration".
-//   - the secret is encrypted at rest (encryptionService.encryptObject) — see the SECRET
+//   - the secret is meant to be encrypted at rest — see the SECRET
 //     note below; config/metadata pass through.
-//   - save → re-get (which decrypt()s) → ThirdPartyIntegrationDto.toDto, which ALWAYS nulls secret.
+//   - store → reload (decrypting the secret) → map to the wire DTO, which ALWAYS nulls the secret.
 //
-// Response: CustomHttpResponse.single(dto) → httpx.OK(w, dto). Gated ADMIN_INTEGRATION_MANAGE.
+// Response: the saved integration via httpx.OK(w, dto). Gated ADMIN_INTEGRATION_MANAGE.
 func (h *Handler) integrationCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, integrationManagePerm) {
 		return
@@ -93,14 +93,14 @@ func (h *Handler) integrationCreate(w http.ResponseWriter, r *http.Request) {
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(result, CREATE, PLATFORM, {thirdParty})
+	// TODO(audit): write an admin audit event when an integration is created.
 	httpx.OK(w, integrationDto(saved))
 }
 
-// integrationUpdate handles update: get-or-404, overwrite
+// integrationUpdate updates an integration: load-or-404, overwrite
 // name/description/thirdParty/config/metadata, conditionally re-encrypt the secret
 // (isNeededToUpdateSecret: a non-null, non-empty secret whose every field is non-null → replace;
-// otherwise keep the existing encrypted secret), save, re-get → DTO (secret nulled). Note the
+// otherwise keep the existing encrypted secret), store, reload → DTO (secret nulled). Note the
 // update does NOT default name/description like create — it stores them verbatim (so a blank name
 // is persisted blank). Gated ADMIN_INTEGRATION_MANAGE.
 func (h *Handler) integrationUpdate(w http.ResponseWriter, r *http.Request) {
@@ -144,13 +144,13 @@ func (h *Handler) integrationUpdate(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, integrationDto(existing))
 }
 
-// integrationDelete handles delete (via the admin service.delete):
-// get-or-404, then the canBeDeleted factory gate (no factory blocks a greenfield integration), then
-// deleteById → success("Successful operation"). Gated ADMIN_INTEGRATION_MANAGE.
+// integrationDelete deletes an integration:
+// load-or-404, then a deletion-eligibility gate (nothing blocks a greenfield integration), then
+// delete by id → "Successful operation". Gated ADMIN_INTEGRATION_MANAGE.
 //
-// The canBeDeleted check is a ThirdPartyFactory concern (e.g. a gateway still referenced by a bill)
-// — there is no factory registry here, so deletion always proceeds (greenfield). When a
-// factory DOES block, the delete returns 400 "ThirdParty Integration cannot be deleted because it is used
+// The eligibility check would block an integration still referenced by other resources (e.g. a
+// gateway still used by a bill) — there is no such registry here, so deletion always proceeds
+// (greenfield). When it DOES block, the delete returns 400 "ThirdParty Integration cannot be deleted because it is used
 // by other resources".
 func (h *Handler) integrationDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, integrationManagePerm) {
@@ -165,23 +165,23 @@ func (h *Handler) integrationDelete(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.NotFound(fmt.Sprintf("ThirdParty Integration with id %s not found", id)))
 		return
 	}
-	// TODO: canBeDeleted factory gate → 400 "ThirdParty Integration cannot be deleted because
-	// it is used by other resources" when a factory blocks (no factory registry here).
+	// TODO: deletion-eligibility gate → 400 "ThirdParty Integration cannot be deleted because
+	// it is used by other resources" when the integration is still referenced (no such registry here).
 	if _, err := h.repo.DeleteDoc(r.Context(), integrationCollection, id); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(existing, DELETE, PLATFORM)
+	// TODO(audit): write an admin audit event when an integration is deleted.
 	httpx.OK(w, "Successful operation")
 }
 
-// integrationHealthCheckByID handles healthCheck(id): the health check is a
-// ThirdPartyFactory operation (a live vendor call) — not wired (no factory registry /
+// integrationHealthCheckByID runs the health check for a stored integration by id: the check is a
+// live vendor call — not wired (no vendor registry /
 // no live calls here). Gated ADMIN_INTEGRATION_READ.
 func (h *Handler) integrationHealthCheckByID(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, integrationReadPerm) {
 		return
 	}
-	// The integration is first get()'d (404 if absent) before the factory health check; the live
+	// The integration is first loaded (404 if absent) before the health check; the live
 	// health check itself is the external part → not wired.
 	id := chi.URLParam(r, "id")
 	existing, err := h.repo.FindDoc(r.Context(), integrationCollection, id)
@@ -195,8 +195,8 @@ func (h *Handler) integrationHealthCheckByID(w http.ResponseWriter, r *http.Requ
 	httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented, "integration health check not implemented"))
 }
 
-// integrationHealthCheckBody handles healthCheck(integration body): same factory integration, but
-// over an ad-hoc (unsaved) integration body. Gated ADMIN_INTEGRATION_READ.
+// integrationHealthCheckBody runs the health check over an ad-hoc (unsaved) integration body:
+// same live vendor call as the by-id variant. Gated ADMIN_INTEGRATION_READ.
 func (h *Handler) integrationHealthCheckBody(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, integrationReadPerm) {
 		return
@@ -209,8 +209,8 @@ func (h *Handler) integrationHealthCheckBody(w http.ResponseWriter, r *http.Requ
 	httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented, "integration health check not implemented"))
 }
 
-// integrationBTCPayStores handles getBTCPayStores: BTCPayServerClient.getStores(ctx) is a live
-// BTCPay Server API call → not wired (no live calls). Gated ADMIN_INTEGRATION_READ.
+// integrationBTCPayStores lists a BTCPay Server's stores: a live BTCPay Server
+// API call → not wired (no live calls). Gated ADMIN_INTEGRATION_READ.
 func (h *Handler) integrationBTCPayStores(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, integrationReadPerm) {
 		return
@@ -223,8 +223,8 @@ func (h *Handler) integrationBTCPayStores(w http.ResponseWriter, r *http.Request
 	httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented, "BTCPay stores not implemented"))
 }
 
-// integrationWhmcsDetails handles getWhmcsIntegrationDetails: WhmcsAdminIntegrationService
-// .getIntegrationDetails(id) is a live WHMCS API call → not wired. Gated ADMIN_INTEGRATION_READ.
+// integrationWhmcsDetails returns a WHMCS integration's details: a live WHMCS
+// API call → not wired. Gated ADMIN_INTEGRATION_READ.
 func (h *Handler) integrationWhmcsDetails(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, integrationReadPerm) {
 		return
@@ -257,7 +257,7 @@ func integrationFields(name, description, thirdParty string, config any, metadat
 }
 
 // integrationDoc builds the full stored doc for a create, including the secret. SECRET note: the
-// secret is stored ENCRYPTED at rest (encryptionService.encryptObject) and decrypt()d on read,
+// secret is meant to be stored ENCRYPTED at rest and decrypted on read,
 // but the response DTO always nulls the secret — so the wire shape is unaffected by encryption.
 // The admin.Handler has no encryptor dependency (and the strict file rules forbid adding one),
 // so the secret is stored as-provided (plaintext-at-rest, consistent with the existing plaintext-passthrough
@@ -266,21 +266,21 @@ func integrationFields(name, description, thirdParty string, config any, metadat
 func integrationDoc(name, description, thirdParty string, config, secret any, metadata map[string]any) pgdoc.M {
 	d := integrationFields(name, description, thirdParty, config, metadata)
 	if secret != nil {
-		d["secret"] = secret // TODO(secret): encryptionService.encryptObject — encryptor not wired.
+		d["secret"] = secret // TODO(secret): encrypt the secret at rest — encryptor not wired.
 	}
 	return d
 }
 
-// integrationDto maps a stored doc to the ThirdPartyIntegrationDto wire shape: `_id`→`id`, drop
-// `_class`, and ALWAYS null the secret (ThirdPartyIntegrationDto.toDto sets secret(null)). Under
+// integrationDto maps a stored doc to the wire shape: `_id`→`id`, drop
+// `_class`, and ALWAYS null the secret. Under
 // null-omitting serialization a null secret is omitted entirely (it does not appear as `"secret":null`).
 func integrationDto(doc pgdoc.M) pgdoc.M {
 	shapeDoc(doc)         // _id→id, drop _class
-	delete(doc, "secret") // toDto nulls secret → omitted
+	delete(doc, "secret") // the DTO always nulls the secret → omitted
 	return doc
 }
 
-// isNeededToUpdateSecret reports isNeededToUpdateSecret: a secret is
+// isNeededToUpdateSecret reports whether the incoming secret should replace the stored one: a secret is
 // replaced only when it is non-null, non-empty, and every field value is non-null. A null secret,
 // an empty object, or one with any null field → keep the existing secret.
 func isNeededToUpdateSecret(secret any) bool {

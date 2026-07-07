@@ -27,7 +27,7 @@ func (r *Repo) InsertPricePlanDoc(ctx context.Context, doc pgdoc.M) (pgdoc.M, er
 	return doc, nil
 }
 
-// PricePlanByID loads a plan by id (findById): the raw plan doc, or (nil,nil) when absent.
+// PricePlanByID loads a plan by id: the raw plan doc, or (nil,nil) when absent.
 func (r *Repo) PricePlanByID(ctx context.Context, id string) (pgdoc.M, error) {
 	return r.FindDoc(ctx, pricePlanCollection, id)
 }
@@ -42,14 +42,13 @@ func (r *Repo) DeletePricePlanDoc(ctx context.Context, id string) (int64, error)
 	return r.DeleteDoc(ctx, pricePlanCollection, id)
 }
 
-// PricePlanUsedInExternalServices checks existsByPricePlanId: any
-// externalService whose `pricePlanIds` array contains this id (array containment — the explicit
-// form of the old implicit scalar-equality-matches-array-element).
+// PricePlanUsedInExternalServices reports whether any externalService's
+// `pricePlanIds` array contains this id (array containment).
 func (r *Repo) PricePlanUsedInExternalServices(ctx context.Context, id string) (bool, error) {
 	return r.c("externalService").Exists(ctx, pgdoc.M{"pricePlanIds": pgdoc.M{"$contains": id}})
 }
 
-// PricePlanUsedInProjects checks existsByPricePlanId: any project whose services
+// PricePlanUsedInProjects reports whether any project's services
 // array has an element referencing this price plan (`services[].pricePlanId`).
 func (r *Repo) PricePlanUsedInProjects(ctx context.Context, id string) (bool, error) {
 	return r.c("project").Exists(ctx, pgdoc.M{"services": pgdoc.M{"$contains": pgdoc.M{"pricePlanId": id}}})
@@ -68,7 +67,7 @@ func (r *Repo) InsertPricePlanRuleDoc(ctx context.Context, doc pgdoc.M) (pgdoc.M
 	return doc, nil
 }
 
-// PricePlanRuleByID loads a rule by id (findById): the raw rule doc, or (nil,nil).
+// PricePlanRuleByID loads a rule by id: the raw rule doc, or (nil,nil).
 func (r *Repo) PricePlanRuleByID(ctx context.Context, id string) (pgdoc.M, error) {
 	return r.FindDoc(ctx, pricePlanRuleCollection, id)
 }
@@ -83,7 +82,7 @@ func (r *Repo) DeletePricePlanRuleDoc(ctx context.Context, id string) (int64, er
 	return r.DeleteDoc(ctx, pricePlanRuleCollection, id)
 }
 
-// PricePlanRulesByPlanID loads rules by plan (findAllByPricePlanId): the raw rule docs
+// PricePlanRulesByPlanID loads all rules for a plan: the raw rule docs
 // (never nil).
 func (r *Repo) PricePlanRulesByPlanID(ctx context.Context, pricePlanID string) ([]pgdoc.M, error) {
 	out := []pgdoc.M{}
@@ -93,14 +92,14 @@ func (r *Repo) PricePlanRulesByPlanID(ctx context.Context, pricePlanID string) (
 	return out, nil
 }
 
-// DeletePricePlanRulesByPlanID deletes every rule of a price plan (the delete cascade:
-// getRulesByPricePlanId(id).forEach(delete)).
+// DeletePricePlanRulesByPlanID deletes every rule of a price plan (the delete cascade that
+// removes all rules belonging to the plan).
 func (r *Repo) DeletePricePlanRulesByPlanID(ctx context.Context, pricePlanID string) error {
 	_, err := r.c(pricePlanRuleCollection).DeleteMany(ctx, pgdoc.M{"pricePlanId": pricePlanID})
 	return err
 }
 
-// PricePlanRuleByPlanIDAndName loads a rule by (plan,name) (findByPricePlanIdAndName): the matching
+// PricePlanRuleByPlanIDAndName loads a rule by (plan,name): the matching
 // rule, or (nil,nil) when none (used by the clone same-name conflict check).
 func (r *Repo) PricePlanRuleByPlanIDAndName(ctx context.Context, pricePlanID, name string) (pgdoc.M, error) {
 	var doc pgdoc.M
@@ -112,7 +111,7 @@ func (r *Repo) PricePlanRuleByPlanIDAndName(ctx context.Context, pricePlanID, na
 	return doc, nil
 }
 
-// SetPricePlanRuleField persists a single checkAttributes default field ($set).
+// SetPricePlanRuleField persists a single default attribute field on a rule.
 func (r *Repo) SetPricePlanRuleField(ctx context.Context, id, field string, value any) (int64, error) {
 	ok, err := r.c(pricePlanRuleCollection).SetByID(ctx, id, pgdoc.M{field: value}, nil)
 	if err != nil {

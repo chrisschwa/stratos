@@ -11,7 +11,7 @@ import (
 	"github.com/menlocloud/stratos/internal/platform/billing"
 )
 
-// TestExpireSavingsContracts exercises SavingsContractService.expireContracts: only ACTIVE
+// TestExpireSavingsContracts exercises expiring savings contracts: only ACTIVE
 // contracts whose endDate is strictly before now flip to EXPIRED; ACTIVE-future and already
 // non-ACTIVE contracts are untouched.
 func TestExpireSavingsContracts(t *testing.T) {

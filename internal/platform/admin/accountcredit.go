@@ -17,16 +17,15 @@ import (
 // id-aware writes via the crud.go helpers, the exact perms /
 // error strings / response envelopes, `_id`→`id` shaping on the way out.
 //
-// Perms (AdminPermissionEnum): the two READ endpoints gate ADMIN_ACCOUNT_CREDIT_READ
-// ("admin:account_credit:read"); create/update/delete gate ADMIN_ACCOUNT_CREDIT_MANAGE
-// ("admin:account_credit:manage").
+// Perms: the two READ endpoints gate "admin:account_credit:read";
+// create/update/delete gate "admin:account_credit:manage".
 //
 // create/update/delete wrap an audit event — deferred this pass (// TODO(audit));
 // the persisted state + the response are faithful.
 //
-// Currency conversion on create: create sets
-// invoiceExchangeRate = getExchangeRate(baseCurrency, invoiceCurrency, now).
-// getExchangeRate returns 1 when baseCurrency == invoiceCurrency, otherwise it calls
+// Currency conversion on create: create sets invoiceExchangeRate to the exchange rate
+// from baseCurrency to invoiceCurrency at the current time.
+// That rate is 1 when baseCurrency == invoiceCurrency; otherwise it calls
 // the external ExchangeClient (BNR/Stratos HTTP) — not implemented. So create succeeds with no live call
 // when the billing-configuration baseCurrency equals the billing profile currency (the greenfield
 // single-currency case); a cross-currency create needs the FX lookup → returns 501 (see createAccountCredit).
@@ -71,8 +70,8 @@ type updateAccountCreditReq struct {
 	InitialAmount   json.Number `json:"initialAmount"`
 }
 
-// accountCreditList lists credits: findAllByBillingProfile(billingProfileId) sorted
-// createdAt DESC. NOTE: the list is wrapped in a single(...) envelope (NOT a paged list),
+// accountCreditList lists credits for a billing profile, newest first. NOTE: the list is
+// returned as a single-object envelope (NOT a paged list),
 // so it is a bare {data:[...]} with NO paging — httpx.OK over the slice.
 func (h *Handler) accountCreditList(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, accountCreditReadPerm) {
@@ -89,7 +88,7 @@ func (h *Handler) accountCreditList(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, docs)
 }
 
-// accountCreditGet returns the credit: getById(accountId) → single, or 400 "Account credit not
+// accountCreditGet returns the credit by accountId as a single object, or 400 "Account credit not
 // found" when absent. The {billingProfileId} path segment is ignored.
 func (h *Handler) accountCreditGet(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, accountCreditReadPerm) {
@@ -110,7 +109,7 @@ func (h *Handler) accountCreditGet(w http.ResponseWriter, r *http.Request) {
 // accountCreditCreate creates a credit for (billingProfileId, amount): resolve the billing profile
 // (404 "Billing profile with id %s not found. " when absent), build the credit (amount/initialAmount=req.amount,
 // currency=billingConfiguration.baseCurrency, invoiceCurrency=profile.currency, invoiceExchangeRate
-// = FX(base, invoice)), save → single(saved). Cross-currency FX is an external lookup → 501.
+// = FX(base, invoice)), then return the saved credit as a single object. Cross-currency FX is an external lookup → 501.
 func (h *Handler) accountCreditCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, accountCreditManagePerm) {
 		return
@@ -132,7 +131,7 @@ func (h *Handler) accountCreditCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// billingConfigurationService.getBillingConfiguration().getBaseCurrency().
+	// Read the base currency from the billing configuration.
 	baseCurrency, err := h.repo.AccountCreditBaseCurrency(r.Context())
 	if httpx.WriteError(w, err) {
 		return
@@ -150,19 +149,19 @@ func (h *Handler) accountCreditCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Tie the credit to the profile (set billingProfileId) — without it
-	// the credit is orphaned: excluded from findAllByBillingProfile + the balance/account-credit total.
+	// the credit is orphaned: excluded from the per-profile credit list + the balance/account-credit total.
 	doc["billingProfileId"] = billingProfileID
 
 	saved, err := h.repo.InsertDoc(r.Context(), accountCreditCollection, doc)
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditService.auditAdmin(result, CREATE, ORGANIZATION)
+	// TODO(audit): write an admin audit event when an account credit is created.
 	httpx.OK(w, shapeDoc(saved))
 }
 
-// accountCreditUpdate updates a credit (id, uaReq): getById(id)-or-400 → overwrite invoiceCurrency,
-// initialAmount, amount, currency (the 4 update-request fields) → save → single.
+// accountCreditUpdate updates a credit by id (400 when absent), overwriting invoiceCurrency,
+// initialAmount, amount, currency (the 4 update-request fields) and returning the saved credit as a single object.
 func (h *Handler) accountCreditUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, accountCreditManagePerm) {
 		return
@@ -178,7 +177,7 @@ func (h *Handler) accountCreditUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if existing == nil {
-		// AccountCreditService.getById → HttpError.badRequest("Account credit not found")
+		// Missing credit → 400 "Account credit not found".
 		httpx.WriteError(w, httpx.BadRequest("Account credit not found"))
 		return
 	}
@@ -206,8 +205,8 @@ func (h *Handler) accountCreditUpdate(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// accountCreditDelete deletes a credit: getById(id)-or-400 (the audit snapshot read), then
-// delete (findById.ifPresent::delete) → success() → httpx.OK(w, "Successful operation").
+// accountCreditDelete deletes a credit by id (400 when absent, which also reads the audit snapshot),
+// then deletes it and returns "Successful operation".
 func (h *Handler) accountCreditDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, accountCreditManagePerm) {
 		return
@@ -218,13 +217,13 @@ func (h *Handler) accountCreditDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if existing == nil {
-		// AccountCreditAdminService.delete → accountCreditService.getById(id) (400) BEFORE delete.
+		// The credit is looked up (400 when absent) BEFORE delete.
 		httpx.WriteError(w, httpx.BadRequest("Account credit not found"))
 		return
 	}
 	if _, err := h.repo.DeleteDoc(r.Context(), accountCreditCollection, id); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditService.auditAdmin(existing, DELETE, ORGANIZATION)
+	// TODO(audit): write an admin audit event when an account credit is deleted.
 	httpx.OK(w, "Successful operation")
 }

@@ -113,7 +113,7 @@ func (p *Project) IsDisabled() bool { return p.Status == StatusDisabled }
 func (p *Project) IsEnabled() bool  { return p.Status == StatusEnabled }
 
 // HasServices reports whether the project has any attached external services
-// (nonNull(services) && !services.isEmpty()).
+// (non-nil and non-empty).
 func (p *Project) HasServices() bool { return len(p.Services) > 0 }
 
 // ServiceIDs returns the serviceId of each attached ProjectExternalService (the link to

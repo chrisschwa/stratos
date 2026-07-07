@@ -17,7 +17,7 @@ import (
 // id-aware CRUD via the crud.go helpers, exact perms / error strings / response
 // envelopes, `_id`→`id` shaping on the way out.
 //
-// Permissions (AdminPermissionEnum):
+// Permissions:
 //   - read endpoints   → ADMIN_MESSAGE_TEMPLATE_READ   ("admin:message_template:read")
 //   - mutation endpts  → ADMIN_MESSAGE_TEMPLATE_MANAGE ("admin:message_template:manage")
 //
@@ -26,8 +26,8 @@ import (
 // UI exercises.
 //
 // NOTE: handler.go already registers the bare list `GET /message-templates` (h.listRaw — the
-// admin-FE landing read). That faithful list (listTemplates → findAll) is a
-// raw passthrough today; upgrading it to the faithful single-DTO list is OUT OF SCOPE this pass
+// admin-FE landing read). That list is a
+// raw passthrough today; upgrading it to the single-DTO list is OUT OF SCOPE this pass
 // (see 'deferred'). routeMessageTemplate registers only the not-yet-present routes:
 // POST (create), GET/{id}, PUT/{id}, DELETE/{id}, GET /placeholders.
 
@@ -46,8 +46,8 @@ func (h *Handler) routeMessageTemplate(r chi.Router) {
 	r.Delete("/message-templates/{id}", h.messageTemplateDelete)
 }
 
-// messageTemplateReq is the MessageTemplate domain's request-body fields. create() persists the
-// whole body (key/category/messageTitle/messageBody/disabled/systemTemplate/targets); update() only
+// messageTemplateReq holds the message-template request-body fields. Create persists the
+// whole body (key/category/messageTitle/messageBody/disabled/systemTemplate/targets); update only
 // overwrites messageTitle/messageBody/disabled. Optional blank
 // strings are omitted so the JSON drops them (a null field is dropped, not "").
 type messageTemplateReq struct {
@@ -60,7 +60,7 @@ type messageTemplateReq struct {
 	Targets        map[string]any `json:"targets"`
 }
 
-// createDoc builds the stored JSON for create(): the full body. `disabled`/`systemTemplate` are
+// createDoc builds the stored JSON for the create handler: the full body. `disabled`/`systemTemplate` are
 // primitives (always stored, default false). Optional strings/targets are omitted when blank
 // (an absent field is dropped, not emitted as ""/null).
 func (req messageTemplateReq) createDoc() pgdoc.M {
@@ -83,7 +83,7 @@ func (req messageTemplateReq) createDoc() pgdoc.M {
 	return d
 }
 
-// messageTemplateCreate handles create(): existsByKey → 400, else save → single(saved).
+// messageTemplateCreate handles creation: reject with 400 when a template with the key already exists, otherwise persist and return the saved doc.
 func (h *Handler) messageTemplateCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, messageTemplateManagePerm) {
 		return
@@ -98,7 +98,7 @@ func (h *Handler) messageTemplateCreate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if exists {
-		// HttpError.badRequest(MAIL_TEMPLATE_WITH_KEY_EXIST) — trailing space verbatim.
+		// 400 with the exact message (the trailing space is intentional).
 		httpx.WriteError(w, httpx.BadRequest("Mail template with key already exists "))
 		return
 	}
@@ -106,11 +106,11 @@ func (h *Handler) messageTemplateCreate(w http.ResponseWriter, r *http.Request) 
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(result, CREATE, PLATFORM)
+	// TODO(audit): write an admin audit event for the template creation.
 	httpx.OK(w, shapeDoc(saved))
 }
 
-// messageTemplateGet handles getMessageTemplate / getTemplateById: findById-or-404 → single.
+// messageTemplateGet loads a template by id and returns it, or 404 when it doesn't exist.
 func (h *Handler) messageTemplateGet(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, messageTemplatePerm) {
 		return
@@ -120,15 +120,15 @@ func (h *Handler) messageTemplateGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if doc == nil {
-		// HttpError.notFound(MAIL_TEMPLATE_NOT_FOUND) — trailing space verbatim.
+		// 404 with the exact message (the trailing space is intentional).
 		httpx.WriteError(w, httpx.NotFound("Mail template not found "))
 		return
 	}
 	httpx.OK(w, shapeDoc(doc))
 }
 
-// messageTemplateUpdate handles update(): getTemplateById-or-404 → overwrite messageTitle/messageBody/
-// disabled ONLY (key/category/systemTemplate/targets are left untouched) → save → single.
+// messageTemplateUpdate loads a template by id (404 when absent), overwrites messageTitle/messageBody/
+// disabled ONLY (key/category/systemTemplate/targets are left untouched), saves, and returns it.
 func (h *Handler) messageTemplateUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, messageTemplateManagePerm) {
 		return
@@ -148,9 +148,9 @@ func (h *Handler) messageTemplateUpdate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	before := maps.Clone(existing)
-	// update() sets messageTitle/messageBody unconditionally (a null in the body nulls the field) and
+	// The update sets messageTitle/messageBody unconditionally (a null in the body nulls the field) and
 	// disabled (primitive). Drop the old optional strings first so an omitted field becomes null
-	// (dropped on the wire), matching setMessageTitle(null)/setMessageBody(null).
+	// (dropped on the wire).
 	delete(existing, "messageTitle")
 	delete(existing, "messageBody")
 	if req.MessageTitle != "" {
@@ -163,14 +163,14 @@ func (h *Handler) messageTemplateUpdate(w http.ResponseWriter, r *http.Request) 
 	if err := h.repo.ReplaceDoc(r.Context(), messageTemplateCollection, id, existing); httpx.WriteError(w, err) {
 		return
 	}
-	// UPDATE audit: field-level diff (middleware computes diffSnapshots(before, after)).
+	// UPDATE audit: record a field-level diff of the before/after snapshots.
 	after, _ := h.repo.FindDoc(r.Context(), messageTemplateCollection, id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// messageTemplateDelete handles deleteMessageTemplate / delete(): getTemplateById-or-404 → deleteById
-// → returns 202 Accepted (NO body).
+// messageTemplateDelete loads a template by id (404 when absent), deletes it, and
+// returns 202 Accepted (NO body).
 func (h *Handler) messageTemplateDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, messageTemplateManagePerm) {
 		return
@@ -187,14 +187,13 @@ func (h *Handler) messageTemplateDelete(w http.ResponseWriter, r *http.Request) 
 	if _, err := h.repo.DeleteDoc(r.Context(), messageTemplateCollection, id); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(template, DELETE, PLATFORM)
+	// TODO(audit): write an admin audit event for the template deletion.
 	// 202 Accepted, no body.
 	httpx.Accepted(w)
 }
 
-// messageTemplatePlaceholders handles getMessageTemplatePlaceholders / listPlaceholders():
-// single(map of category → [placeholders]) → httpx.OK(w, map). The map is the static
-// per-category placeholder set built in listPlaceholders.
+// messageTemplatePlaceholders returns the static per-category placeholder map
+// (category → [placeholders]).
 func (h *Handler) messageTemplatePlaceholders(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, messageTemplatePerm) {
 		return
@@ -230,8 +229,8 @@ func withCommon(extras ...messageTemplatePlaceholder) []messageTemplatePlacehold
 	return append(out, extras...)
 }
 
-// messageTemplatePlaceholderMap is the static per-category placeholder map.
-// Keyed by the category enum name (the map key is the enum's name()).
+// messageTemplatePlaceholderMap is the static per-category placeholder map,
+// keyed by the category name.
 func messageTemplatePlaceholderMap() map[string][]messageTemplatePlaceholder {
 	return map[string][]messageTemplatePlaceholder{
 		"INVOICE": withCommon(

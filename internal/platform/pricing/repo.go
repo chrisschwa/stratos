@@ -39,7 +39,7 @@ func (r *Repo) ensureBills(ctx context.Context) error {
 	return r.ensureError
 }
 
-// FindPricePlanByID mirrors pricePlanRepository.findById (nil when absent).
+// FindPricePlanByID loads a price plan by id (nil when absent).
 func (r *Repo) FindPricePlanByID(ctx context.Context, id string) (*PricePlan, error) {
 	var pp PricePlan
 	found, err := r.plans.FindOne(ctx, pgdoc.M{"_id": id}, &pp)
@@ -49,7 +49,7 @@ func (r *Repo) FindPricePlanByID(ctx context.Context, id string) (*PricePlan, er
 	return &pp, nil
 }
 
-// PublicPricePlans mirrors findAllByAccessModeAndEnabledIsTrue(PUBLIC).
+// PublicPricePlans returns the enabled plans with PUBLIC access mode.
 func (r *Repo) PublicPricePlans(ctx context.Context) ([]PricePlan, error) {
 	var out []PricePlan
 	if err := r.plans.Find(ctx, pgdoc.M{"accessMode": AccessPublic, "enabled": true}, &out); err != nil {
@@ -58,7 +58,7 @@ func (r *Repo) PublicPricePlans(ctx context.Context) ([]PricePlan, error) {
 	return out, nil
 }
 
-// RulesByPricePlanIDAndTimeUnit mirrors pricePlanRuleService.getRulesByPricePlanIdAndTimeUnit.
+// RulesByPricePlanIDAndTimeUnit returns the rules for a price plan and time unit.
 func (r *Repo) RulesByPricePlanIDAndTimeUnit(ctx context.Context, pricePlanID, timeUnit string) ([]PricePlanRule, error) {
 	var out []PricePlanRule
 	if err := r.rules.Find(ctx, pgdoc.M{"pricePlanId": pricePlanID, "timeUnit": timeUnit}, &out); err != nil {

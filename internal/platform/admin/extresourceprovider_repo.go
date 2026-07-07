@@ -15,8 +15,8 @@ func (r *Repo) InsertHmacKey(ctx context.Context, doc pgdoc.M) (string, error) {
 	return r.c(erpHmacCollection).InsertOne(ctx, doc)
 }
 
-// DeleteHmacKey deletes an HMAC key by its string id (findById(id) then delete —
-// a silent no-op when absent). Returns the deleted count.
+// DeleteHmacKey deletes an HMAC key by its string id (a silent no-op when
+// the key is absent). Returns the deleted count.
 func (r *Repo) DeleteHmacKey(ctx context.Context, id string) (int64, error) {
 	ok, err := r.c(erpHmacCollection).DeleteByID(ctx, id)
 	if err != nil {

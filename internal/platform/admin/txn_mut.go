@@ -12,11 +12,11 @@ import (
 )
 
 // txn_mut.go implements the admin transaction record-edit MUTATIONS:
-//   PUT/DELETE /admin/account-credit-transactions/{id}   (AccountCreditTransactionControllerAdmin)
-//   PUT/DELETE /admin/collect-transactions/{id}          (CollectTransactionControllerAdmin)
-//   PUT/DELETE /admin/credit-card-transaction/{id}       (CreditCardTransactionControllerAdmin)
-// All gated ADMIN_TRANSACTION_MANAGE. update = getById-or-404 → overwrite a fixed set of scalar
-// fields → save → single. delete = getById-or-404 → deleteById → CustomHttpResponse.success(). These
+//   PUT/DELETE /admin/account-credit-transactions/{id}
+//   PUT/DELETE /admin/collect-transactions/{id}
+//   PUT/DELETE /admin/credit-card-transaction/{id}
+// All gated ADMIN_TRANSACTION_MANAGE. update = load-or-404 → overwrite a fixed set of scalar
+// fields → save → return the single record. delete = load-or-404 → delete by id → success message. These
 // are pure record edits (the Stripe-touching one is the separate /refund/{id}, handled elsewhere). The
 // collections are empty under greenfield (every call 404s) but the surface must exist (else 405).
 //
@@ -46,8 +46,8 @@ func (h *Handler) routeTransactionMut(r chi.Router) {
 	r.Delete("/credit-card-transaction/{id}", h.txnDelete("creditCardTransaction"))
 }
 
-// txnUpdate handles the transaction update: get-or-404 → overwrite the listed fields (money fields as
-// decimal.Decimal) → save → single. An absent/null req field clears it (nulls omitted on the way out).
+// txnUpdate handles the transaction update: load-or-404 → overwrite the listed fields (money fields as
+// decimal.Decimal) → save → return the single record. An absent/null req field clears it (nulls omitted on the way out).
 func (h *Handler) txnUpdate(collection string, fields []string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !h.require(w, r, txnPerm) {
@@ -86,12 +86,12 @@ func (h *Handler) txnUpdate(collection string, fields []string) http.HandlerFunc
 		if err := h.repo.ReplaceDoc(r.Context(), collection, id, existing); httpx.WriteError(w, err) {
 			return
 		}
-		// TODO(audit): UPDATE TRANSACTION audit (before/after diff)
+		// TODO(audit): write an admin audit event for a transaction update (before/after diff).
 		httpx.OK(w, shapeDeep(existing))
 	}
 }
 
-// txnDelete handles the transaction delete: get-or-404 → deleteById → CustomHttpResponse.success().
+// txnDelete handles the transaction delete: load-or-404 → delete by id → success message.
 func (h *Handler) txnDelete(collection string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !h.require(w, r, txnPerm) {
@@ -109,7 +109,7 @@ func (h *Handler) txnDelete(collection string) http.HandlerFunc {
 		if _, err := h.repo.DeleteDoc(r.Context(), collection, id); httpx.WriteError(w, err) {
 			return
 		}
-		// TODO(audit): auditService.auditAdmin(txn, DELETE, PLATFORM)
+		// TODO(audit): write an admin audit event when a transaction is deleted (PLATFORM scope).
 		httpx.OK(w, "Successful operation")
 	}
 }

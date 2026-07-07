@@ -45,7 +45,7 @@ func (e *Engine) ApplyPricePlanRules(rules []PricePlanRule, resource *BillingRes
 	return out, nil
 }
 
-// SumNetAmount mirrors the reduction in PricePlanService.applyPricePlan: per rule
+// SumNetAmount reduces the rule results: per rule
 // sum its amounts' net amounts, then sum across rules (zero default).
 func SumNetAmount(results []PricePlanRuleResult) decimal.Decimal {
 	total := dZero
@@ -241,7 +241,7 @@ func (e *Engine) getTierValue(rule PricePlanRule, resource *BillingResource, tie
 		now := e.clock.Now()
 		if createdAt.After(firstDayOfCurrentMonth(now)) {
 			lastDay := lastDayOfCurrentMonth(now)
-			hoursDiff := int64(lastDay.Sub(createdAt) / 3600000000000) // ChronoUnit.HOURS.between (truncate toward zero)
+			hoursDiff := int64(lastDay.Sub(createdAt) / 3600000000000) // whole hours between, truncated toward zero
 			maxHours := int64(totalHoursCurrentMonth(now))
 			if hoursDiff < maxHours {
 				pricePerHour := divDecimal128(value, decimal.NewFromInt(maxHours))

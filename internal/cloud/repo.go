@@ -133,7 +133,7 @@ func (r *Repo) Update(ctx context.Context, res *CloudResource) (*CloudResource, 
 			return err
 		}
 		// OCC guard: proceed only when stored updatedAt ≤ incoming. A missing timestamp on
-		// either side rejects (mirrors the previous $lte type-bracketing behavior).
+		// either side rejects the write.
 		if cur.UpdatedAt == nil || res.UpdatedAt == nil || cur.UpdatedAt.After(*res.UpdatedAt) {
 			return nil // OCC reject (DB newer) — caller re-reads latest
 		}
@@ -174,12 +174,12 @@ func (r *Repo) FindByID(ctx context.Context, id string) (*CloudResource, error) 
 	return &out, nil
 }
 
-// ExistsByServiceIDAndExternalID mirrors repo.existsByServiceIdAndExternalId.
+// ExistsByServiceIDAndExternalID reports whether a resource with that service + external id is cached.
 func (r *Repo) ExistsByServiceIDAndExternalID(ctx context.Context, serviceID, externalID string) (bool, error) {
 	return r.resources.Exists(ctx, pgdoc.M{"serviceId": serviceID, "externalId": externalID})
 }
 
-// FindAllByProjectID / FindAllByUserID mirror the by-project / by-user finders.
+// FindAllByProjectID / FindAllByUserID return every cached resource for a project or user.
 func (r *Repo) FindAllByProjectID(ctx context.Context, projectID string) ([]CloudResource, error) {
 	return r.findAll(ctx, pgdoc.M{"projectId": projectID})
 }

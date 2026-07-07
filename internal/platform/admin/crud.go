@@ -85,8 +85,8 @@ func shapeDoc(doc pgdoc.M) pgdoc.M {
 	return doc
 }
 
-// FindDoc is findById → raw pgdoc.M (still carrying `_id`, injected as a string), or (nil,nil) when
-// absent. Callers shapeDoc() before writing the response.
+// FindDoc looks up a document by id → raw pgdoc.M (still carrying `_id`, injected as a string), or
+// (nil,nil) when absent. Callers shapeDoc() before writing the response.
 func (r *Repo) FindDoc(ctx context.Context, collection, id string) (pgdoc.M, error) {
 	var doc pgdoc.M
 	found, err := r.c(collection).Get(ctx, id, &doc)

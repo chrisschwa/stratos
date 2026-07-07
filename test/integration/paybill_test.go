@@ -12,7 +12,7 @@ import (
 	"github.com/menlocloud/stratos/internal/platform/pricing"
 )
 
-// TestPayBillWithCredits exercises PayBillBalanceService.payBill (credit-only, no gateway):
+// TestPayBillWithCredits exercises paying a bill from credits only (no gateway):
 // promo-pay → PAID, account-credit-pay → PAID, + the 3 guards (open/paid/insufficient).
 func TestPayBillWithCredits(t *testing.T) {
 	ctx := context.Background()
@@ -32,7 +32,7 @@ func TestPayBillWithCredits(t *testing.T) {
 		bp := "bp-promo"
 		profile := &billing.BillingProfile{ID: bp, Currency: "USD"}
 		// settlement candidates require expirationDate > now — a null expiry is
-		// EXCLUDED (current() filter); never-expiring credits carry the NO_EXPIRATION sentinel.
+		// EXCLUDED (the candidate filter requires expirationDate > now); never-expiring credits carry the NO_EXPIRATION sentinel.
 		noExpiry := time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
 		pcid := mustInsertID(t, db, "promotionalCredit", pgdoc.M{"billingProfileId": bp, "remainingAmount": decimalOf(t, "10"), "expirationDate": noExpiry})
 		billID := bill(bp, "SENT", "10")

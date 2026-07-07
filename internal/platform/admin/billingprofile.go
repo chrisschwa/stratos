@@ -10,25 +10,25 @@ package admin
 //   - update = ADMIN_BILLING_PROFILE_UPDATE = admin:billing_profile:update
 //
 // IN SCOPE (faithful datastore state-flips via the crud.go helpers):
-//   PUT  /{id}                              update — overwrite the ~17 editable profile fields ($set)
+//   PUT  /{id}                              update — overwrite the ~17 editable profile fields
 //   PUT  /automatic-suspension/{id}         set suspensionConfiguration + overwriteSuspension
 //   PUT  /tax-configuration/{id}            set taxConfiguration
 //   PUT  /project-provisioning-quota/{id}   set projectProvisioningQuota
 //   PUT  /reseller/{id}                     set reseller (+ the disable-while-in-use guard)
 //   PUT  /message-templates/{id}            set messageTemplateConfig
-//   DELETE /{id}                            in-use guards (bill/project/card) → deleteById
+//   DELETE /{id}                            in-use guards (bill/project/card) → delete by id
 //   POST /validations/{validationId}/status/{status}   flip the validation doc's status
 //
 // EXTERNAL INTEGRATION POINTS (external/cross-service — NOT executed; 501 after any faithful pre-step):
-//   POST /{id}                              create  — createBillingProfile +
+//   POST /{id}                              create  — create the billing profile +
 //                                           activation + optional project create
 //   POST /{id}/action/{status}             status transition — activation / suspension
-//                                           (markKycVerified / suspend / unsuspend), KYC + cloud side
+//                                           (KYC verify / suspend / unsuspend), KYC + cloud side
 //                                           effects; only the deterministic guards are faithful.
-// (The validation APPROVED branch is LIVE since dev229: activationConstraintCompleted(VALIDATION)
-// + the billing_profile_validated mail via h.activation; nil activation → the original 501 posture.)
+// (The validation APPROVED branch is LIVE since dev229: it marks the activation constraint completed
+// + sends the billing_profile_validated mail via h.activation; nil activation → the original 501 posture.)
 //
-// DEFERRED reads (need the BillingSummary / usage / aggregation compute — money engine, must NOT be
+// DEFERRED reads (need the BillingSummary / usage / cost-rollup compute — money engine, must NOT be
 // reimplemented here): GET /{id} (BillingSummary), GET (AggregatedBillingProfile list w/ balances),
 // GET /search, GET /financial/{id}, GET {id}/cost-info, GET /validations. Left UNregistered (the bare
 // GET /billing-profile list is already in handler.go). See 'deferred'.
@@ -81,8 +81,8 @@ func (h *Handler) routeBillingProfile(r chi.Router) {
 	r.Post("/billing-profile/validations/{validationId}/status/{status}", h.billingProfileValidationStatus)
 }
 
-// billingProfileByID handles getBillingProfile: getBillingProfileById-or-404
-// → mapToBillingSummary → a BillingSummary (profile + computed financials), NOT
+// billingProfileByID loads the profile by id or 404s, then returns a
+// BillingSummary (profile + computed financials), NOT
 // the raw profile. ADMIN_BILLING_PROFILE_READ.
 func (h *Handler) billingProfileByID(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:billing_profile:read") {
@@ -101,14 +101,14 @@ func (h *Handler) billingProfileByID(w http.ResponseWriter, r *http.Request) {
 	if err := decodeTyped(raw, &bp); httpx.WriteError(w, err) {
 		return
 	}
-	// Compute the real financials (balance / account credit / promotional credit) as
-	// mapToBillingSummary does; without WithFinancials the summary carries the placeholder 0s
+	// Compute the real financials (balance / account credit / promotional credit);
+	// without WithFinancials the summary carries the placeholder 0s
 	// (the admin bp-detail stat row then reads $0 despite real credits).
 	summary := billing.ToSummary(&bp).WithFinancials(r.Context(), h.billing, time.Now().UTC())
 	httpx.OK(w, summary)
 }
 
-// billingProfileFinancialSummary handles getFinancialSummary: profile-or-404 → BillingProfileFinancialOverview
+// billingProfileFinancialSummary loads the profile or 404s, then returns a BillingProfileFinancialOverview
 // {currency, totalCredit, totalPromotionalCredit, currentMonthUsage(=current-month bill net),
 // totalSuccessfulBillTransactions, totalSuccessfulAddFundsTransactions, numberOfTransactionsLastMonth}.
 func (h *Handler) billingProfileFinancialSummary(w http.ResponseWriter, r *http.Request) {
@@ -128,8 +128,8 @@ func (h *Handler) billingProfileFinancialSummary(w http.ResponseWriter, r *http.
 	cutoff := now.AddDate(0, 0, -30)
 	credit, _ := h.billing.AccountCreditTotal(r.Context(), id)
 	promo, _ := h.billing.AvailablePromotionalTotal(r.Context(), id, now)
-	// currentMonthUsage = the current-month bill's net (getCurrentMonthUsage —
-	// the bill net, NOT live metering).
+	// currentMonthUsage = the current-month bill's net
+	// (the bill net, NOT live metering).
 	usage := json.Number("0")
 	if bills, err := h.billing.BillsByBillingProfile(r.Context(), id); err == nil {
 		c, _ := billing.MonthlyBillCosts(bills, now)
@@ -151,10 +151,9 @@ func (h *Handler) billingProfileFinancialSummary(w http.ResponseWriter, r *http.
 	})
 }
 
-// billingProfileCostInfo handles costInfoByBillingProfileId /
-// getUsageOverviewForBillingProfile: a BillingUsageOverview. Cost fields are
+// billingProfileCostInfo returns a BillingUsageOverview. Cost fields are
 // computed from the profile's bills (current/last month net, by-category, topResourcePrices — the
-// same aggregation the client cost-info dashboard uses); balance/accountCredit/promotionalCredits/
+// same rollup the client cost-info dashboard uses); balance/accountCredit/promotionalCredits/
 // dueAmount are real (the balance layer). projects is an empty map (the FE keys off
 // billingProfileCostInfo, not per-project).
 func (h *Handler) billingProfileCostInfo(w http.ResponseWriter, r *http.Request) {
@@ -177,8 +176,8 @@ func (h *Handler) billingProfileCostInfo(w http.ResponseWriter, r *http.Request)
 	balance, _ := bal.CurrentBalance(r.Context(), id, now)
 	dueAmt, _ := bal.CurrentDue(r.Context(), id)
 	zero := json.Number("0")
-	// Per-month bill-net costs + by-category + topResourcePrices — the SAME aggregation the client
-	// cost-info dashboard uses (admin costInfoByBillingProfileId calls the same overview). The
+	// Per-month bill-net costs + by-category + topResourcePrices — the SAME rollup the client
+	// cost-info dashboard uses (the admin overview reuses it). The
 	// CREATED column reads resource.createdAt → look it up from the cloud cache. Forecast = current
 	// (prorate deferred).
 	cur, last := zero, zero
@@ -215,8 +214,8 @@ func (h *Handler) billingProfileCostInfo(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// billingProfileValidations handles listValidationsByStatus(PENDING):
-// the PENDING validations, each joined with its billing profile (BillingProfileValidationWithProfile).
+// billingProfileValidations returns the PENDING validations,
+// each joined with its billing profile (BillingProfileValidationWithProfile).
 // Greenfield → empty.
 func (h *Handler) billingProfileValidations(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:billing_profile:read") {
@@ -240,8 +239,7 @@ func (h *Handler) billingProfileValidations(w http.ResponseWriter, r *http.Reque
 	httpx.List(w, out)
 }
 
-// billingProfileSearch handles getBillingProfilesByUser /
-// searchBillingProfiles: filter billingProfile by the non-blank query params (exact match) → shaped
+// billingProfileSearch filters billing profiles by the non-blank query params (exact match) → shaped
 // list of BillingProfile.
 func (h *Handler) billingProfileSearch(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:billing_profile:read") {
@@ -266,9 +264,9 @@ func (h *Handler) billingProfileSearch(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, out)
 }
 
-// billingProfileIDNotFound is the exact 404
-// ("Billing profile with id %s not found. " — trailing space, interpolated) from
-// get(id).orElseThrow.
+// billingProfileIDNotFound builds the exact 404
+// ("Billing profile with id %s not found. " — trailing space, interpolated) returned
+// when the profile id is absent.
 func billingProfileIDNotFound(id string) *httpx.HTTPError {
 	return httpx.NotFound(fmt.Sprintf("Billing profile with id %s not found. ", id))
 }
@@ -289,12 +287,12 @@ func (h *Handler) findBillingProfileOr404(w http.ResponseWriter, r *http.Request
 
 // ─── PUT /{id} — update ──────────────────────────────────────────────────────────────────────────
 
-// billingProfileUpdateReq is the editable BillingProfile fields update() copies from the
-// request body onto the loaded profile (the ~17 setters). The body IS a full BillingProfile but only
+// billingProfileUpdateReq holds the editable BillingProfile fields the update copies from the
+// request body onto the loaded profile (~17 fields). The body IS a full BillingProfile but only
 // these fields are applied (the rest of the loaded doc is preserved). Optional strings are pointers so
-// a `$set` of an absent field is skipped (it stays as-is) while a present "" clears it — matching a
-// missing key decoding to null and a present key to its value, then the setter writing
-// it. pricePlanConfig is passed through as raw JSON (admin-configured sub-doc).
+// an absent field is skipped (it stays as-is) while a present "" clears it — a
+// missing key decodes to nil and a present key to its value, which is then written.
+// pricePlanConfig is passed through as raw JSON (admin-configured sub-doc).
 type billingProfileUpdateReq struct {
 	FirstName       *string          `json:"firstName"`
 	LastName        *string          `json:"lastName"`
@@ -315,9 +313,9 @@ type billingProfileUpdateReq struct {
 	PricePlanConfig *json.RawMessage `json:"pricePlanConfig"`
 }
 
-// setMap builds the `$set` document mirroring the setters. Every setter is called (including with
-// null), so an explicitly-present field is set even to its zero value; an absent field is left untouched
-// (the loaded doc keeps it). Bool setters always run (primitives default to false), so company /
+// setMap builds the update document for the editable fields. Every present field is written (including
+// its zero value); an absent field is left untouched
+// (the loaded doc keeps it). The bool fields are always written (they default to false), so company /
 // taxPayer are set whenever present (which they always are after a full-profile round-trip).
 func (req billingProfileUpdateReq) setMap() pgdoc.M {
 	d := pgdoc.M{}
@@ -375,8 +373,8 @@ func (req billingProfileUpdateReq) setMap() pgdoc.M {
 	return d
 }
 
-// billingProfileUpdate handles update: get-or-404 → copy the editable fields
-// → save → single. ADMIN_BILLING_PROFILE_UPDATE.
+// billingProfileUpdate loads the profile or 404s → copies the editable fields
+// → saves → returns it. ADMIN_BILLING_PROFILE_UPDATE.
 func (h *Handler) billingProfileUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, billingProfileUpdatePerm) {
 		return
@@ -398,7 +396,7 @@ func (h *Handler) billingProfileUpdate(w http.ResponseWriter, r *http.Request) {
 	if _, err := h.repo.SetFields(r.Context(), billingProfileCollection, id, set); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(profile, UPDATE, ORGANIZATION, diff(snapshotBefore, after))
+	// TODO(audit): write an admin audit event for the profile update (UPDATE, ORGANIZATION) with the before/after diff.
 	httpx.OK(w, shapeDoc(existing))
 }
 
@@ -412,8 +410,8 @@ type automaticSuspensionConfigReq struct {
 	SuspensionConfiguration *json.RawMessage `json:"suspensionConfiguration"`
 }
 
-// billingProfileAutomaticSuspension handles updateAutomaticSuspension: get-or-404 →
-// setSuspensionConfiguration + setOverwriteSuspension → save → single. The body is optional;
+// billingProfileAutomaticSuspension loads the profile or 404s →
+// sets suspensionConfiguration + overwriteSuspension → saves → returns it. The body is optional;
 // an empty/absent body decodes to the zero value (overwriteSuspension=false,
 // suspensionConfiguration=null) — the admin UI always sends a body, so we treat absent as the zero request.
 func (h *Handler) billingProfileAutomaticSuspension(w http.ResponseWriter, r *http.Request) {
@@ -445,7 +443,7 @@ func (h *Handler) billingProfileAutomaticSuspension(w http.ResponseWriter, r *ht
 	if _, err := h.repo.SetFields(r.Context(), billingProfileCollection, id, set); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(profile, CONFIGURE, ORGANIZATION, {field:"suspensionConfig"})
+	// TODO(audit): write an admin audit event for the suspension-config change (CONFIGURE, ORGANIZATION).
 	httpx.OK(w, shapeDoc(existing))
 }
 
@@ -465,8 +463,8 @@ func (req taxConfigurationReq) doc() pgdoc.M {
 	return d
 }
 
-// billingProfileTaxConfiguration handles updateBillingTaxConfiguration: get-or-404 →
-// setTaxConfiguration → save → single.
+// billingProfileTaxConfiguration loads the profile or 404s →
+// sets taxConfiguration → saves → returns it.
 func (h *Handler) billingProfileTaxConfiguration(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, billingProfileUpdatePerm) {
 		return
@@ -485,7 +483,7 @@ func (h *Handler) billingProfileTaxConfiguration(w http.ResponseWriter, r *http.
 	if _, err := h.repo.SetFields(r.Context(), billingProfileCollection, id, pgdoc.M{"taxConfiguration": req.doc()}); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(profile, CONFIGURE, ORGANIZATION, {field:"taxConfig"})
+	// TODO(audit): write an admin audit event for the tax-config change (CONFIGURE, ORGANIZATION).
 	httpx.OK(w, shapeDoc(existing))
 }
 
@@ -497,8 +495,8 @@ type projectProvisioningQuotaReq struct {
 	Limit   int  `json:"limit"`
 }
 
-// billingProfileProvisioningQuota handles updateProjectProvisioningQuota: get-or-404 →
-// setProjectProvisioningQuota → save → single.
+// billingProfileProvisioningQuota loads the profile or 404s →
+// sets projectProvisioningQuota → saves → returns it.
 func (h *Handler) billingProfileProvisioningQuota(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, billingProfileUpdatePerm) {
 		return
@@ -518,7 +516,7 @@ func (h *Handler) billingProfileProvisioningQuota(w http.ResponseWriter, r *http
 	if _, err := h.repo.SetFields(r.Context(), billingProfileCollection, id, pgdoc.M{"projectProvisioningQuota": quota}); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(profile, CONFIGURE, ORGANIZATION, {field:"provisioningQuota"})
+	// TODO(audit): write an admin audit event for the provisioning-quota change (CONFIGURE, ORGANIZATION).
 	httpx.OK(w, shapeDoc(existing))
 }
 
@@ -529,10 +527,10 @@ type resellerReq struct {
 	Enabled bool `json:"enabled"`
 }
 
-// billingProfileReseller handles updateReseller: get-or-404 → if currently reseller-enabled AND the
+// billingProfileReseller loads the profile or 404s → if currently reseller-enabled AND the
 // request disables it AND external services still reference it as a reseller → 400
-// "Cannot disable reseller option because it is used by external services"; else setReseller → save →
-// single. (existsExternalServicesByResellerBillingProfileId = exists externalService where
+// "Cannot disable reseller option because it is used by external services"; else sets reseller → saves →
+// returns it. (The in-use check matches any externalService where
 // config.openstackReseller.enabled==true && config.openstackReseller.billingProfileId==id.)
 func (h *Handler) billingProfileReseller(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, billingProfileUpdatePerm) {
@@ -548,7 +546,7 @@ func (h *Handler) billingProfileReseller(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	// isResellerEnabled() = the profile's current reseller.enabled.
+	// The profile's current reseller.enabled flag.
 	currentlyEnabled := false
 	if rs, ok := existing["reseller"].(pgdoc.M); ok {
 		currentlyEnabled, _ = rs["enabled"].(bool)
@@ -568,7 +566,7 @@ func (h *Handler) billingProfileReseller(w http.ResponseWriter, r *http.Request)
 	if _, err := h.repo.SetFields(r.Context(), billingProfileCollection, id, pgdoc.M{"reseller": reseller}); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(profile, CONFIGURE, ORGANIZATION, {field:"reseller"})
+	// TODO(audit): write an admin audit event for the reseller change (CONFIGURE, ORGANIZATION).
 	httpx.OK(w, shapeDoc(existing))
 }
 
@@ -589,8 +587,8 @@ func (req messageTemplateConfigReq) doc() pgdoc.M {
 	return d
 }
 
-// billingProfileMessageTemplates handles updateMessageTemplate: get-or-404 → setMessageTemplateConfig →
-// save → single.
+// billingProfileMessageTemplates loads the profile or 404s → sets messageTemplateConfig →
+// saves → returns it.
 func (h *Handler) billingProfileMessageTemplates(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, billingProfileUpdatePerm) {
 		return
@@ -609,21 +607,21 @@ func (h *Handler) billingProfileMessageTemplates(w http.ResponseWriter, r *http.
 	if _, err := h.repo.SetFields(r.Context(), billingProfileCollection, id, pgdoc.M{"messageTemplateConfig": req.doc()}); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(profile, CONFIGURE, ORGANIZATION, {field:"messageTemplate"})
+	// TODO(audit): write an admin audit event for the message-template change (CONFIGURE, ORGANIZATION).
 	httpx.OK(w, shapeDoc(existing))
 }
 
 // ─── DELETE /{id} ────────────────────────────────────────────────────────────────────────────────
 
-// billingProfileDelete handles delete(): the three in-use guards (bills → projects → cards) then
-// service.delete (get-or-404 → deleteById → success). Each guard 400s with its exact translation.
-// NOTE the card-guard reuses the *projects* translation string (a pre-existing quirk, kept faithfully).
+// billingProfileDelete runs the three in-use guards (bills → projects → cards) then
+// deletes (get-or-404 → delete by id → success). Each guard 400s with its exact message.
+// NOTE the card-guard reuses the *projects* message string (a pre-existing quirk, kept faithfully).
 func (h *Handler) billingProfileDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, billingProfileUpdatePerm) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	// billAdminService.isBillingProfileInUse = bill.existsByBillingProfileId.
+	// Guard: is the billing profile referenced by any bill?
 	inUse, err := h.repo.ExistsByBillingProfileID(r.Context(), "bill", id)
 	if httpx.WriteError(w, err) {
 		return
@@ -632,7 +630,7 @@ func (h *Handler) billingProfileDelete(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Billing profile is in use for some bills"))
 		return
 	}
-	// projectAdminService.isBillingProfileInUse = project.existsByBillingProfileId.
+	// Guard: is the billing profile referenced by any project?
 	inUse, err = h.repo.ExistsByBillingProfileID(r.Context(), "project", id)
 	if httpx.WriteError(w, err) {
 		return
@@ -641,7 +639,7 @@ func (h *Handler) billingProfileDelete(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Billing profile is in use for some projects"))
 		return
 	}
-	// creditCardService.existsCardsByBillingProfile = creditCard.existsByBillingProfileId. The
+	// Guard: is the billing profile referenced by any credit card? The
 	// "…for some projects" message is reused here (kept faithful to the source).
 	inUse, err = h.repo.ExistsByBillingProfileID(r.Context(), "creditCard", id)
 	if httpx.WriteError(w, err) {
@@ -651,22 +649,22 @@ func (h *Handler) billingProfileDelete(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Billing profile is in use for some projects"))
 		return
 	}
-	// service.delete: get-or-404 → deleteById.
+	// Delete: get-or-404 → delete by id.
 	if _, ok := h.findBillingProfileOr404(w, r, id); !ok {
 		return
 	}
 	if _, err := h.repo.DeleteDoc(r.Context(), billingProfileCollection, id); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(bp, DELETE, ORGANIZATION)
+	// TODO(audit): write an admin audit event when a billing profile is deleted (DELETE, ORGANIZATION).
 	httpx.OK(w, "Successful operation")
 }
 
 // ─── POST /{id}/action/{status} — status transition ──────────────────────────────────────────────
 
-// billingProfileUpdateStatus handles updateBillingProfileStatus: parse the status, get-or-404, then the
+// billingProfileUpdateStatus parses the status, loads the profile or 404s, then applies the
 // transition matrix. The deterministic guards ARE faithful:
-//   - an invalid status enum → 400 (Status.valueOf throws → mapped to 400).
+//   - an invalid status value → 400.
 //   - desired == current → 400 "Billing profile with id %s already has status %s ".
 //   - any transition other than NEW→ACTIVE / ACTIVE→SUSPENDED / SUSPENDED→ACTIVE →
 //     400 "Status %s is not supported ".
@@ -679,7 +677,7 @@ func (h *Handler) billingProfileUpdateStatus(w http.ResponseWriter, r *http.Requ
 	}
 	id := chi.URLParam(r, "id")
 	status := chi.URLParam(r, "status")
-	// Status.valueOf(status) — an invalid value → 400.
+	// Reject an invalid status value → 400.
 	if !isValidBillingProfileStatus(status) {
 		httpx.WriteError(w, httpx.BadRequest(fmt.Sprintf("Invalid billing profile status %s", status)))
 		return
@@ -705,8 +703,8 @@ func (h *Handler) billingProfileUpdateStatus(w http.ResponseWriter, r *http.Requ
 			fmt.Sprintf("updateBillingProfileStatus transition not implemented: %s -> %s", current, status)))
 		return
 	}
-	// BillingProfileAdminService.updateBillingProfileStatus — the transition matrix drives the
-	// ActivationService (KYC verify + activate / suspend + process flip / unsuspend + resolve).
+	// The transition matrix drives the activation flow
+	// (KYC verify + activate / suspend + process flip / unsuspend + resolve).
 	bp, err := h.billing.FindByID(r.Context(), id)
 	if httpx.WriteError(w, err) {
 		return
@@ -734,12 +732,12 @@ func (h *Handler) billingProfileUpdateStatus(w http.ResponseWriter, r *http.Requ
 		}
 		_ = h.activation.ResolveSuspensionIfExists(r.Context(), bp, billing.SourceAdmin)
 	}
-	// re-read + audit(UPDATE, ORGANIZATION, {status, previousStatus}) + return the updated doc.
+	// re-read + audit the status change (UPDATE, ORGANIZATION, {status, previousStatus}) + return the updated doc.
 	updated, ok := h.findBillingProfileOr404(w, r, id)
 	if !ok {
 		return
 	}
-	// TODO(audit): auditAdmin UPDATE {status, previousStatus} — the global middleware logs the action.
+	// TODO(audit): audit the status change {status, previousStatus} — the global middleware logs the action.
 	httpx.OK(w, shapeDoc(updated))
 }
 
@@ -755,8 +753,8 @@ func isValidBillingProfileStatus(s string) bool {
 
 // ─── POST /{id} — create ─────────────────────────────────────────────────────────────────────────
 
-// billingProfileCreate handles create(): createBillingProfile(request) +
-// activationConstraintCompleted + (createProject ? create the project).
+// billingProfileCreate creates a billing profile +
+// marks the activation constraint completed + (optionally creates the project).
 // The whole chain (org resolution, owner population, currency, activation, optional project create) is
 // in the billing/org/project/activation services — none wired into admin.Handler → 501. No
 // faithful pre-step exists (the request carries no id to resolve).
@@ -777,10 +775,10 @@ func (h *Handler) billingProfileCreate(w http.ResponseWriter, r *http.Request) {
 
 // ─── POST /validations/{validationId}/status/{status} ────────────────────────────────────────────
 
-// billingProfileValidationStatus handles updateValidationStatus: parse the status enum, then
-// updateStatus (findById-or-404 "Billing profile validation not found." → set status
-// → save). On APPROVED it additionally runs activationConstraintCompleted +
-// notifyBillingProfileValidation — cross-service/email effects → not wired. The validation-doc
+// billingProfileValidationStatus parses the status, then updates it
+// (load by id or 404 "Billing profile validation not found." → set status
+// → save). On APPROVED it additionally marks the activation constraint completed +
+// sends the validation notification — cross-service/email effects → not wired. The validation-doc
 // status flip (the persisted core) is faithful and applied first.
 func (h *Handler) billingProfileValidationStatus(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, billingProfileUpdatePerm) {
@@ -801,7 +799,7 @@ func (h *Handler) billingProfileValidationStatus(w http.ResponseWriter, r *http.
 		httpx.WriteError(w, httpx.NotFound("Billing profile validation not found."))
 		return
 	}
-	// service.updateStatus: setStatus(status) → save (the faithful persisted effect).
+	// Set the status → save (the faithful persisted effect).
 	existing["status"] = status
 	if _, err := h.repo.SetFields(r.Context(), billingProfileValidationCollection, validationID, pgdoc.M{"status": status}); httpx.WriteError(w, err) {
 		return
@@ -813,15 +811,15 @@ func (h *Handler) billingProfileValidationStatus(w http.ResponseWriter, r *http.
 				"validation APPROVED activation/notify not implemented"))
 			return
 		}
-		// getBillingProfileById(validation.billingProfileId) →
-		// activationConstraintCompleted(bp, VALIDATION) → notifyBillingProfileValidation.
+		// Load the profile referenced by the validation →
+		// mark the activation constraint completed (VALIDATION) → send the validation notification.
 		bpID, _ := existing["billingProfileId"].(string)
 		bp, err := h.billing.FindByID(r.Context(), bpID)
 		if httpx.WriteError(w, err) {
 			return
 		}
 		if bp == nil {
-			// getBillingProfileById → 404 (trailing period+space).
+			// Profile absent → 404 (trailing period+space).
 			httpx.WriteError(w, httpx.NotFound(fmt.Sprintf("Billing profile with id %s not found. ", bpID)))
 			return
 		}

@@ -23,14 +23,14 @@ import (
 // permission validation. Each mutation also writes an audit event — deferred
 // this pass (// TODO(audit)); the persisted state + response envelope are faithful.
 //
-// Permissions: listRoles gates on ADMIN_ROLE_READ (admin:role:read) and
-// create/update/delete on ADMIN_ROLE_MANAGE (admin:role:manage).
+// Permissions: the list read gates on "admin:role:read" and
+// create/update/delete on "admin:role:manage".
 
 const adminRoleManagePerm = "admin:role:manage"
 
 const adminRoleCollection = "adminRole"
 
-// adminRoleNamePattern is the role NAME_PATTERN: "^[A-Z][A-Z0-9_]*$".
+// adminRoleNamePattern is the allowed role-name pattern: "^[A-Z][A-Z0-9_]*$".
 var adminRoleNamePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
 
 // routeAdminRole registers the AdminRole mutation routes. The GET list is already registered in
@@ -73,7 +73,7 @@ func adminRoleStoredDoc(name, description string, permissions []string, now time
 }
 
 // createAdminRole creates a role: normalize name (upper), validate name +
-// permissions, reject a duplicate name, save → single(AdminRoleDto.from).
+// permissions, reject a duplicate name, then return the saved role as a single DTO.
 func (h *Handler) createAdminRole(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, adminRoleManagePerm) {
 		return
@@ -92,7 +92,7 @@ func (h *Handler) createAdminRole(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, err)
 		return
 	}
-	// existsByName(normalizedName) → duplicate.
+	// Reject when a role with this name already exists.
 	existing, err := h.repo.FindOneBy(r.Context(), adminRoleCollection, pgdoc.M{"name": normalizedName})
 	if httpx.WriteError(w, err) {
 		return
@@ -106,12 +106,12 @@ func (h *Handler) createAdminRole(w http.ResponseWriter, r *http.Request) {
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(role, CREATE, PLATFORM)
+	// TODO(audit): write an admin audit event when a role is created.
 	httpx.OK(w, adminRoleDtoFromDoc(saved))
 }
 
-// updateAdminRole updates a role: findById-or-404, then (if non-null) validate +
-// replace permissions and (if non-null) replace description, save → single(AdminRoleDto.from).
+// updateAdminRole updates a role: look up by id (404 when absent), then (if non-null) validate +
+// replace permissions and (if non-null) replace description, then return the saved role as a single DTO.
 func (h *Handler) updateAdminRole(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, adminRoleManagePerm) {
 		return
@@ -144,12 +144,12 @@ func (h *Handler) updateAdminRole(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.ReplaceDoc(r.Context(), adminRoleCollection, roleID, existing); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(role, UPDATE, PLATFORM, diff)
+	// TODO(audit): write an admin audit event when a role is updated.
 	httpx.OK(w, adminRoleDtoFromDoc(existing))
 }
 
-// deleteAdminRole deletes a role: findById-or-404, reject if any adminPermission
-// doc still references the role name, else delete → success("Successful operation").
+// deleteAdminRole deletes a role: look up by id (404 when absent), reject if any adminPermission
+// doc still references the role name, else delete and return "Successful operation".
 func (h *Handler) deleteAdminRole(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, adminRoleManagePerm) {
 		return
@@ -175,12 +175,12 @@ func (h *Handler) deleteAdminRole(w http.ResponseWriter, r *http.Request) {
 	if _, err := h.repo.DeleteDoc(r.Context(), adminRoleCollection, roleID); httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): auditAdmin(role, DELETE, PLATFORM)
+	// TODO(audit): write an admin audit event when a role is deleted.
 	httpx.OK(w, "Successful operation")
 }
 
 // validateAdminRoleName checks the name: a built-in name is reserved; otherwise
-// it must match the NAME_PATTERN.
+// it must match the allowed role-name pattern.
 func validateAdminRoleName(name string) *httpx.HTTPError {
 	if isBuiltInAdminRole(name) {
 		return httpx.BadRequest(fmt.Sprintf("Cannot use reserved role name '%s'", name))
@@ -216,7 +216,7 @@ func isBuiltInAdminRole(role string) bool {
 }
 
 // isValidAdminPermissionToken reports whether a token is valid: "*" (bare) is valid; an
-// exact AdminPermissionEnum key is valid; a "<resourceType>:*" wildcard is valid iff the resource
+// exact admin-permission key is valid; a "<resourceType>:*" wildcard is valid iff the resource
 // type matches a known key prefix (the key text up to its last ':').
 func isValidAdminPermissionToken(permission string) bool {
 	if permission == "*" {
@@ -241,7 +241,7 @@ var adminPermissionKeySet = func() map[string]bool {
 	return m
 }()
 
-// adminPermissionResourceTypeSet is the valid resource types: each AdminPermissionEnum
+// adminPermissionResourceTypeSet is the valid resource types: each admin-permission
 // key's text up to its last ':' (e.g. "admin:user:read" → "admin:user").
 var adminPermissionResourceTypeSet = func() map[string]bool {
 	m := make(map[string]bool, len(AllPermissionKeys))

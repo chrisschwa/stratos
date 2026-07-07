@@ -11,7 +11,7 @@ import (
 // don't cover: typed User decoding (so the User domain MarshalJSON — consent/customInfo always
 // present + computed `language` — applies on the wire) and the project-owner "in use" check.
 
-// userByID loads a user by id (findById): a typed User, or (nil,nil) when absent. The
+// userByID loads a user by id: a typed User, or (nil,nil) when absent. The
 // caller maps nil → the 404 "User with id %s not found ".
 func (r *Repo) userByID(ctx context.Context, id string) (*user.User, error) {
 	var u user.User
@@ -22,8 +22,8 @@ func (r *Repo) userByID(ctx context.Context, id string) (*user.User, error) {
 	return &u, nil
 }
 
-// userBySub loads the newest user by sub (findBySubOrderByCreatedAtDesc): the newest User with
-// that sub, or (nil,nil) when none (the caller wraps null in single(null) → {}).
+// userBySub loads the newest user by sub: the newest User with
+// that sub, or (nil,nil) when none (the caller returns a missing user as an empty {}).
 func (r *Repo) userBySub(ctx context.Context, sub string) (*user.User, error) {
 	if sub == "" {
 		return nil, nil
@@ -37,7 +37,7 @@ func (r *Repo) userBySub(ctx context.Context, sub string) (*user.User, error) {
 	return &u, nil
 }
 
-// userByEmail loads the first user by email (findFirstByEmail): the first User with that email, or
+// userByEmail loads the first user by email: the first User with that email, or
 // (nil,nil) when none (the caller maps non-nil → 400 "User with this email already exists").
 func (r *Repo) userByEmail(ctx context.Context, email string) (*user.User, error) {
 	if email == "" {
@@ -51,7 +51,7 @@ func (r *Repo) userByEmail(ctx context.Context, email string) (*user.User, error
 	return &u, nil
 }
 
-// insertUserDoc writes the UserService.upsert document shape (Update.set writes the
+// insertUserDoc writes the user document shape (with the
 // EXPLICIT empty arrays/maps — consent [], customInfo {}, identities [], services [], metadata {})
 // keyed by a hex-string _id (the users-collection convention the adminapi create established).
 func (r *Repo) insertUserDoc(ctx context.Context, doc pgdoc.M) (pgdoc.M, error) {
@@ -62,20 +62,20 @@ func (r *Repo) insertUserDoc(ctx context.Context, doc pgdoc.M) (pgdoc.M, error) 
 	return doc, nil
 }
 
-// deleteUserByID removes the user doc (UserRepository.deleteById after onCleanUpUser succeeds).
+// deleteUserByID removes the user doc (after the per-user keystone cleanup succeeds).
 func (r *Repo) deleteUserByID(ctx context.Context, id string) error {
 	_, err := r.c("users").DeleteByID(ctx, id)
 	return err
 }
 
-// projectByID loads a project by id (findById): the raw project
+// projectByID loads a project by id: the raw project
 // doc, or (nil,nil) when absent (the caller maps nil → the
 // 404 "The project with id %s was not found. ").
 func (r *Repo) projectByID(ctx context.Context, id string) (pgdoc.M, error) {
 	return r.FindDoc(ctx, "project", id)
 }
 
-// userInUse checks isUserInUse (existsByOwner(sub)): whether
+// userInUse reports whether
 // any project has the (deprecated) `owner` field equal to the sub.
 func (r *Repo) userInUse(ctx context.Context, sub string) (bool, error) {
 	if sub == "" {

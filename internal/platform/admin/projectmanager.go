@@ -18,44 +18,42 @@ import (
 //
 // Call graph:
 //
-//	POST   /projects/manage          addUserToProject(AddUserToProjectRequest{userId,projectId,role})
-//	                                  → projectService.addUserToProject(req)  [the plain overload]
-//	POST   /projects/manage/remove   removeUserFromProject(RemoveUserFromProjectRequest{projectId,sub})
-//	POST   /projects/manage/invite   inviteUserToProject(ProjectUserInviteRequest{projectId,newUser,userIds})
+//	POST   /projects/manage          projectManagerAddUser     {userId, projectId, role}
+//	POST   /projects/manage/remove   projectManagerRemoveUser  {projectId, sub}
+//	POST   /projects/manage/invite   projectManagerInvite      {projectId, newUser, userIds}
 //
-// ── addUserToProject (ProjectService.addUserToProject) ──
+// ── add member ──
 //
-//	project = getProjectById(projectId)            → 404 "The project with id %s was not found. "
-//	user    = userService.getById(userId)          → 404 "User with id %s not found " when absent
-//	if project.isDisabled() (status==DISABLED)     → 400 "Project is suspended. Cannot add user to project"
-//	if memberships.sub already contains user.sub    → 400 "User is already added to project"
-//	memberships += {sub:user.sub, role:req.role}; projectRepository.save(project)   [PERSISTED state]
-//	platformExternalService.addUserToProject(ctx,user)   [CLOUD, not wired — provisions the user on the live
-//	                                                       external services for the project]
-//	return single(project)
+//	project = load by projectId                     → 404 "The project with id %s was not found. "
+//	user    = load by userId                        → 404 "User with id %s not found " when absent
+//	if project status == DISABLED                   → 400 "Project is suspended. Cannot add user to project"
+//	if memberships already contains user.sub        → 400 "User is already added to project"
+//	append {sub:user.sub, role:req.role}; save project   [PERSISTED state]
+//	provision the user on the live external services     [CLOUD, not wired]
+//	return the project
 //
 // The membership append is persisted, then the updated project is returned. The platform runs every
 // cloud call through an ADMIN-scoped tenant client, so members carry no per-user keystone identity —
 // there is no per-user cloud grant to perform (this mirrors the client-side AddMember, datastore-only).
 //
-// ── removeUserFromProject (ProjectManagerAdminService.removeUserFromProject) ──
+// ── remove member ──
 //
-//	project = getProjectById(projectId)            → 404 "The project with id %s was not found. "
-//	user    = userService.getBySub(sub)            → null ⇒ 404 "User not found with sub: " + sub
-//	membership = memberships.first(sub==user.sub)
-//	if membership == null                           → 400 "User is already removed from project"
+//	project = load by projectId                     → 404 "The project with id %s was not found. "
+//	user    = load by sub                           → null ⇒ 404 "User not found with sub: " + sub
+//	membership = first membership with sub==user.sub
+//	if no such membership                           → 400 "User is already removed from project"
 //	if membership.role == OWNER                     → 400 "Project owner cannot be removed from project"
-//	memberships.removeIf(sub==user.sub); projectRepository.save(project)            [PERSISTED state]
-//	(no per-user cloud revoke — admin-scoped model, see addUser)
-//	return single(project)
+//	remove the membership with sub==user.sub; save project            [PERSISTED state]
+//	(no per-user cloud revoke — admin-scoped model, see add member)
+//	return the project
 //
-// ── inviteUserToProject (ProjectManagerAdminService.inviteUserToProject) ──
+// ── invite ──
 //
-//	project = getProjectById(projectId)            → 404 "The project with id %s was not found. "
+//	project = load by projectId                     → 404 "The project with id %s was not found. "
 //	if userIds == null                              → 400 "User IDs must be provided for project invitation"
-//	newUser ? per email: projectInviteService.inviteNewUserToProject(email, project)
-//	        : per userId→user: projectInviteService.inviteToProject(user.email, project)
-//	return success()  ("Successful operation")
+//	newUser ? per email: invite a new user to the project by email address
+//	        : per userId→user: invite the resolved user to the project by their email
+//	return "Successful operation"
 //
 // invite creates project-invite records + sends invitation emails via the wired inviteToProject leg
 // (the same one the admin user-create loop uses). newUser → invite by email address; else resolve
@@ -93,15 +91,15 @@ type projectManagerInviteReq struct {
 	UserIDs   []string `json:"userIds"`
 }
 
-// projectNotFound is the exact 404 (TranslationConstants.PROJECT_ID_WAS_NOT_FOUND,
-// "The project with id %s was not found. " — trailing space, interpolated).
+// projectNotFound is the exact 404 message
+// ("The project with id %s was not found. " — trailing space, interpolated).
 func projectNotFound(id string) *httpx.HTTPError {
 	return httpx.NotFound(fmt.Sprintf("The project with id %s was not found. ", id))
 }
 
-// projectManagerAddUser handles addUserToProject:
+// projectManagerAddUser adds a member to a project:
 // resolve project + user(by id) → suspended/already-member guards → append membership (PERSISTED) →
-// platformExternalService.addUserToProject [CLOUD, not wired].
+// provision the user on the live external services [CLOUD, not wired].
 func (h *Handler) projectManagerAddUser(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectManagePerm) {
 		return
@@ -124,11 +122,11 @@ func (h *Handler) projectManagerAddUser(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if u == nil {
-		// UserService.getById → notFound USER_ID_NOT_FOUND "User with id %s not found "
+		// User not found → 404 "User with id %s not found "
 		httpx.WriteError(w, httpx.NotFound(fmt.Sprintf("User with id %s not found ", req.UserID)))
 		return
 	}
-	// project.isDisabled() == status==DISABLED → suspended guard.
+	// status==DISABLED → suspended guard.
 	if status, _ := proj["status"].(string); status == "DISABLED" {
 		httpx.WriteError(w, httpx.BadRequest("Project is suspended. Cannot add user to project"))
 		return
@@ -152,9 +150,9 @@ func (h *Handler) projectManagerAddUser(w http.ResponseWriter, r *http.Request) 
 	httpx.OK(w, shapeDoc(updated))
 }
 
-// projectManagerRemoveUser handles removeUserFromProject:
+// projectManagerRemoveUser removes a member from a project:
 // resolve project + user(by sub) → membership/owner guards → remove membership (PERSISTED) →
-// platformExternalService.removeUserFromProject [CLOUD, not wired].
+// revoke the user on the live external services [CLOUD, not wired].
 func (h *Handler) projectManagerRemoveUser(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectManagePerm) {
 		return
@@ -177,7 +175,7 @@ func (h *Handler) projectManagerRemoveUser(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if u == nil {
-		// removeUserFromProject: null user → notFound("User not found with sub: " + sub)
+		// null user → 404 "User not found with sub: " + sub
 		httpx.WriteError(w, httpx.NotFound("User not found with sub: "+req.Sub))
 		return
 	}
@@ -190,8 +188,8 @@ func (h *Handler) projectManagerRemoveUser(w http.ResponseWriter, r *http.Reques
 		httpx.WriteError(w, httpx.BadRequest("Project owner cannot be removed from project"))
 		return
 	}
-	// removeIf(memberships.sub == user.sub) → return the updated project. No per-user cloud revoke
-	// (admin-scoped model, see addUser) — and returning the project avoids the state-leak.
+	// Remove the membership with sub == user.sub → return the updated project. No per-user cloud
+	// revoke (admin-scoped model, see add member) — and returning the project avoids the state-leak.
 	if err := h.repo.removeProjectMembership(r.Context(), req.ProjectID, u.Sub); httpx.WriteError(w, err) {
 		return
 	}
@@ -202,8 +200,8 @@ func (h *Handler) projectManagerRemoveUser(w http.ResponseWriter, r *http.Reques
 	httpx.OK(w, shapeDoc(updated))
 }
 
-// projectManagerInvite handles inviteUserToProject:
-// resolve project → null-userIds guard → ProjectInviteService invite [EMAIL/INVITE, not wired].
+// projectManagerInvite invites users to a project:
+// resolve project → null-userIds guard → send project invitations [EMAIL/INVITE, not wired].
 func (h *Handler) projectManagerInvite(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectManagePerm) {
 		return

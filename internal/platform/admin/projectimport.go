@@ -17,25 +17,23 @@ import (
 //
 // Call graph:
 //
-//	GET  /{externalServiceId}              fetchProjectsForImport(esId)  — ADMIN_PROJECT_READ
-//	POST /bulk-import/{externalServiceId}  bulkImportProjects(esId,[…])  — ADMIN_PROJECT_IMPORT
+//	GET  /{externalServiceId}              projectImportFetch  — ADMIN_PROJECT_READ
+//	POST /bulk-import/{externalServiceId}  projectImportBulk   — ADMIN_PROJECT_IMPORT
 //
-// Both first resolve the ExternalService via PlatformExternalService.get(id) (datastore read +
-// decrypt). get() throws ServiceNotFoundException(id) when the doc is absent — a plain
-// RuntimeException → the default handler maps it to HTTP 500 "Service not found: %s" (as
-// here, same as platformConfigByID's plain-RuntimeException→500 precedent).
+// Both first resolve the ExternalService (datastore read + decrypt). A missing service yields
+// HTTP 500 "Service not found: %s" (the same missing-record→500 precedent as platformConfigByID).
 //
-// ⚠ CLOUD, not wired: fetchProjectsForImport makes LIVE Keystone calls (admin identity projects().list()
-// + users().list() + listRoleAssignments()) to enumerate the OpenStack projects/users/roles and
-// diff them against the linked stratos projects. There is no datastore-state of its own to persist (it only
-// READS stratos projects to compute linkage), so after the ExternalService lookup it returns
-// 501 — it never calls the live cloud.
+// ⚠ CLOUD, not wired: projectImportFetch makes LIVE Keystone calls (list projects, users, and role
+// assignments) to enumerate the OpenStack projects/users/roles and diff them against the linked
+// stratos projects. There is no datastore-state of its own to persist (it only READS stratos projects
+// to compute linkage), so after the ExternalService lookup it returns 501 — it never calls the live
+// cloud.
 //
-// bulkImportProjects is IN SCOPE (a pure datastore write — the import path itself makes NO live cloud
+// projectImportBulk is IN SCOPE (a pure datastore write — the import path itself makes NO live cloud
 // call): for each request whose stratosProjectId is blank it inserts a new ENABLED Project doc whose
 // single service is { serviceId: <externalServiceId>, config:{ openstackProjectId: <os project id> }}.
-// Per-item exceptions are caught and logged+continued, then always returns success() — so this
-// endpoint never fails after the ExternalService lookup. Audit (auditAdmin IMPORT) is deferred.
+// Per-item exceptions are caught and logged+continued, then it always returns "Successful operation" —
+// so this endpoint never fails after the ExternalService lookup. Audit (an IMPORT admin event) is deferred.
 
 const projectImportReadPerm = "admin:project:read"
 const projectImportImportPerm = "admin:project:import"
@@ -52,14 +50,14 @@ func (h *Handler) routeProjectImport(r chi.Router) {
 	r.Post("/project-import/bulk-import/{externalServiceId}", h.projectImportBulk)
 }
 
-// serviceNotFound is the exact ServiceNotFoundException message ("Service not found: %s"). It is
-// a plain RuntimeException → mapped to HTTP 500, code 500.
+// projectImportServiceNotFound builds the exact "Service not found: %s" message, mapped to HTTP 500,
+// code 500.
 func projectImportServiceNotFound(id string) *httpx.HTTPError {
 	return httpx.NewError(http.StatusInternalServerError, http.StatusInternalServerError,
 		fmt.Sprintf("Service not found: %s", id))
 }
 
-// projectImportFetch handles fetchProjectsForImport: resolve the ExternalService (→ 500 if absent),
+// projectImportFetch resolves the ExternalService (→ 500 if absent),
 // then list the OpenStack projects LIVE (admin GET /v3/projects) and diff each against the stratos
 // projects already linked to this service (services[].serviceId == esID &&
 // services[].config.openstackProjectId == keystone project id). Each entry carries the keystone
@@ -74,7 +72,7 @@ func (h *Handler) projectImportFetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if raw == nil {
-		// PlatformExternalService.get(esId).orElseThrow(ServiceNotFoundException) → 500.
+		// Missing external service → 500.
 		httpx.WriteError(w, projectImportServiceNotFound(esID))
 		return
 	}
@@ -164,7 +162,7 @@ type openStackImportProject struct {
 }
 
 // openStackProjectImportReq is a bulk-import request element. Only
-// stratosProjectId (the "already linked" guard) and project.{id,name} are read by importSingleProject;
+// stratosProjectId (the "already linked" guard) and project.{id,name} are read on import;
 // users is carried for shape fidelity but unused on import.
 type openStackProjectImportReq struct {
 	StratosProjectID string                  `json:"stratosProjectId"`
@@ -172,10 +170,10 @@ type openStackProjectImportReq struct {
 	Project          *openStackImportProject `json:"project"`
 }
 
-// projectImportBulk handles bulkImportProjects → importProjects: resolve the ExternalService (→ 500 if
-// absent), then for each request whose stratosProjectId is blank insert a new ENABLED Project doc.
+// projectImportBulk resolves the ExternalService (→ 500 if
+// absent), then for each request whose stratosProjectId is blank inserts a new ENABLED Project doc.
 // Per-item failures are swallowed (logged + continue); the endpoint always returns
-// success("Successful operation") after the lookup. Gated ADMIN_PROJECT_IMPORT.
+// "Successful operation" after the lookup. Gated ADMIN_PROJECT_IMPORT.
 func (h *Handler) projectImportBulk(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectImportImportPerm) {
 		return
@@ -187,7 +185,7 @@ func (h *Handler) projectImportBulk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if es == nil {
-		// PlatformExternalService.get(esId) → ServiceNotFoundException → 500 (before any import).
+		// Missing external service → 500 (before any import).
 		httpx.WriteError(w, projectImportServiceNotFound(esID))
 		return
 	}
@@ -198,30 +196,30 @@ func (h *Handler) projectImportBulk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// externalService.getId() — the doc's String id (_id→id). Use the looked-up
+	// The external service's String id (_id→id). Use the looked-up
 	// _id (a string id) so the stored ProjectExternalService.serviceId matches exactly.
 	serviceID := projectImportExternalServiceID(es, esID)
 
 	for i := range reqs {
 		req := reqs[i]
-		// importProjects: skip requests already linked to an stratos project.
+		// Skip requests already linked to an stratos project.
 		if req.StratosProjectID != "" {
 			continue
 		}
-		// importSingleProject: build + save a new project; per-item exceptions are caught and
+		// Build + save a new project; per-item exceptions are caught and
 		// logged+continued (so a malformed/empty project never fails the whole import).
 		if req.Project == nil {
 			continue
 		}
 		doc := projectImportNewProjectDoc(req.Project, serviceID)
 		if _, err := h.repo.InsertDoc(r.Context(), projectImportProjectCollection, doc); err != nil {
-			// log.error(...) and continue — never propagate per-item failures.
+			// Log and continue — never propagate per-item failures.
 			continue
 		}
-		// TODO(audit): auditService.auditAdmin(savedProject, IMPORT, PLATFORM)
+		// TODO(audit): write an admin audit event when a project is imported.
 	}
 
-	// CustomHttpResponse.success() → "Successful operation".
+	// Success response → "Successful operation".
 	httpx.OK(w, "Successful operation")
 }
 
@@ -246,7 +244,7 @@ func projectImportExternalServiceID(es pgdoc.M, fallback string) string {
 	return fallback
 }
 
-// projectImportNewProjectDoc builds the stored JSON for importSingleProject's new Project:
+// projectImportNewProjectDoc builds the stored JSON for a newly imported Project:
 // name = os project name, status = ENABLED, empty memberships/services/customInfo, and a single
 // ProjectExternalService { serviceId, config:{ openstackProjectId } } appended to services.
 // The builder sets memberships=[] / services=[…] / customInfo={} explicitly

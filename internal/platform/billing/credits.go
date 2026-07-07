@@ -12,7 +12,7 @@ import (
 // Repo access for the credit-settlement pay path: the bill, the
 // spendable account-credit balance docs (accountCredit) + promotional credits, and the
 // write-backs the settlement mutates. Account credits are ordered createdAt DESC
-// (settle query, Sort.by(DESC,"createdAt")).
+// (the settle query sorts by createdAt, newest first).
 
 // BillByID loads a bill by _id (nil when absent / malformed id).
 func (r *Repo) BillByID(ctx context.Context, id string) (*pricing.Bill, error) {
@@ -32,9 +32,9 @@ func (r *Repo) SaveBillDoc(ctx context.Context, bill *pricing.Bill) error {
 
 // AccountCreditsByProfile returns the profile's spendable account credits in insertion
 // order — the order the settle path consumes them
-// (findAllByBillingProfileId, NO sort — datastore natural order). ids are time-prefixed +
+// (filtered by billing-profile id, NO sort — natural order). ids are time-prefixed +
 // counter-tailed, so _id ASC reproduces insertion order deterministically. NOTE: the
-// DESC-sorted findAllByBillingProfile is a DIFFERENT query used elsewhere; the settle
+// DESC-sorted by-profile lookup is a DIFFERENT query used elsewhere; the settle
 // path must NOT sort by date DESC, else multi-credit bills exhaust a different credit
 // first → different applied sub-docs/residuals.
 func (r *Repo) AccountCreditsByProfile(ctx context.Context, billingProfileID string) ([]*pricing.AccountCredit, error) {
@@ -49,7 +49,7 @@ func (r *Repo) AccountCreditsByProfile(ctx context.Context, billingProfileID str
 
 // PromotionalCreditCandidates returns the profile's NON-EXPIRED promotional credits with a
 // positive remaining balance (the take candidates). The filter is
-// RemainingAmountGreaterThan(0) AND ExpirationDateIsAfter(now) — an expired promo must NOT be
+// remaining amount > 0 AND expiration date after now — an expired promo must NOT be
 // applied to a bill. (Minted credits carry the NO_EXPIRATION sentinel 9999-01-01, which passes
 // `> now`; same filter as AvailablePromotionalTotal.) _id ASC keeps consumption order
 // deterministic (insertion order, like the unsorted original).
@@ -78,7 +78,7 @@ func (r *Repo) SaveAccountCredit(ctx context.Context, ac *pricing.AccountCredit)
 }
 
 // PendingAccountCreditTransactions / PendingCollectTransactions back the transaction scanner
-// (findByStatusAndCreatedAtBetween(PENDING, now-24h, now-20min) — exclusive bounds): stuck
+// (status PENDING with createdAt between now-24h and now-20min — exclusive bounds): stuck
 // PENDING transactions old enough to not race the live flow but young enough to still matter.
 func (r *Repo) PendingAccountCreditTransactions(ctx context.Context, from, to time.Time) ([]AccountCreditTransaction, error) {
 	return findTyped[AccountCreditTransaction](ctx, r.credits, pgdoc.M{

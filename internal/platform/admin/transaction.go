@@ -15,27 +15,25 @@ import (
 
 // transaction.go implements the transactions surface (/api/v1/admin/transactions). It has a
 // single endpoint — GET /{billingProfileId} — that returns the UNION of a billing profile's collect
-// transactions and account-credit transactions, each mapped into a unified TransactionDto. There are
-// NO mutations on this controller.
+// transactions and account-credit transactions, each mapped into a unified DTO. There are
+// NO mutations on this surface.
 //
-// listTransactions:
+// The endpoint does, in order:
 //
-//	requirePermission(ADMIN_TRANSACTION_READ)
-//	collect = collectTransactionAdminService.getAllCollectTransactionByBillingProfile(bp)
-//	             .map(TransactionDto::mapToTransaction)            // findAll…OrderByCreatedAtDesc
-//	credit  = accountCreditTransactionAdminService.getAllAccountCreditTransactionByBillingProfile(bp)
-//	             .map(TransactionDto::mapToTransaction)            // findAll…OrderByCreatedAtDesc
-//	collect.addAll(credit)                                        // collect first, then credit
-//	return CustomHttpResponse.list(ListResponse.build(collect))   // {data:[…], paging}
+//	require ADMIN_TRANSACTION_READ
+//	load the profile's collect transactions (newest first, all statuses) → map each to the DTO
+//	load the profile's account-credit transactions (newest first, all statuses) → map each to the DTO
+//	concatenate: collect first, then credit
+//	return the list envelope {data:[…], paging}
 //
-// The two finders are the SAME repo methods already used by the per-type by-billing-profile reads in
+// The two loaders are the SAME repo methods already used by the per-type by-billing-profile reads in
 // handler.go (billing.Repo.AllCollectTransactionsByProfile / AllAccountCreditTransactionsByProfile —
-// both createdAt DESC, all statuses). The per-element shape here is the MERGED TransactionDto, NOT
-// the per-type CollectTransactionDto/AccountCreditTransactionDto, so it is mapped locally.
+// both createdAt DESC, all statuses). The per-element shape here is the merged DTO, NOT
+// the per-type collect/account-credit DTOs, so it is mapped locally.
 
 const transactionReadPerm = "admin:transaction:read"
 
-// routeTransaction registers TransactionAdminController. {billingProfileId} reuses the param name
+// routeTransaction registers the transaction read routes. {billingProfileId} reuses the param name
 // handler.go already uses on the sibling /…-transactions/{billingProfileId}/billing-profile routes;
 // this path (/transactions/{billingProfileId}) is a distinct prefix so there is no chi conflict.
 func (h *Handler) routeTransaction(r chi.Router) {
@@ -82,7 +80,7 @@ func (h *Handler) collectTransactionDownload(w http.ResponseWriter, r *http.Requ
 }
 
 // adminTransactionDto is the merged transaction wire shape.
-// Both mapToTransaction overloads target this one shape; the difference is which fields are set per
+// Both mappers target this one shape; the difference is which fields are set per
 // source type (account-credit uses gatewayMessage as BOTH errorMessage and gatewayMessage; collect
 // sets creditCardId). Every nullable field is omitempty so an unset field is dropped from
 // the JSON. The `accountCredit` field is never populated by
@@ -110,8 +108,8 @@ type adminTransactionDto struct {
 	UpdatedAt         *time.Time     `json:"updatedAt,omitempty"`
 }
 
-// transactionsByBillingProfile handles listTransactions: collect first, then account-credit, mapped to
-// the merged TransactionDto, returned as a list envelope.
+// transactionsByBillingProfile lists a billing profile's transactions: collect first, then account-credit,
+// each mapped to the merged DTO, returned as a list envelope.
 func (h *Handler) transactionsByBillingProfile(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, transactionReadPerm) {
 		return
@@ -197,9 +195,8 @@ func mapCollectToTransaction(t *pricing.CollectTransaction) adminTransactionDto 
 }
 
 // mapAccountCreditToTransaction maps an AccountCreditTransaction to the merged DTO:
-// sets transactionType="account-credit", uses gatewayMessage as BOTH errorMessage and gatewayMessage
-// (.errorMessage(getGatewayMessage()) + .gatewayMessage(getGatewayMessage())), and
-// does NOT set creditCardId (account-credit has none).
+// sets transactionType="account-credit", uses gatewayMessage as BOTH errorMessage and gatewayMessage,
+// and does NOT set creditCardId (account-credit has none).
 func mapAccountCreditToTransaction(t *billing.AccountCreditTransaction) adminTransactionDto {
 	return adminTransactionDto{
 		ID:                t.ID,
