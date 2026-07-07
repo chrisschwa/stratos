@@ -48,7 +48,7 @@ jobs:
           helm repo add cnpg https://cloudnative-pg.github.io/charts
           helm dependency build "$CHART_DIR"
           helm lint "$CHART_DIR"
-          helm template "$CHART_DIR" >/dev/null
+          helm template "$CHART_DIR" -f "$CHART_DIR/values-dev.yaml" >/dev/null
 
   # ---- tag v*: package + publish the chart at the tag version (idempotent) ---
   publish:
@@ -78,7 +78,7 @@ jobs:
           helm repo add cnpg https://cloudnative-pg.github.io/charts
           helm dependency build "$CHART_DIR"
           helm lint "$CHART_DIR"
-          helm template "$CHART_DIR" >/dev/null
+          helm template "$CHART_DIR" -f "$CHART_DIR/values-dev.yaml" >/dev/null
           # app-version keeps the v prefix: it is the image tag the templates fall back to,
           # and the docker workflow tags images with the tag name verbatim (v0.1.0).
           helm package "$CHART_DIR" -d /tmp/pkg --version "$version" --app-version "$GITHUB_REF_NAME"
