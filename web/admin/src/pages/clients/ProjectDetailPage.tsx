@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQueryClient } from "@tanstack/react-query"
-import { ArrowLeft, CreditCard, Pause, Play, Plus, RefreshCw, Server, Trash2, Users } from "lucide-react"
+import { ArrowLeft, Building2, CreditCard, Pause, Play, Plus, RefreshCw, Server, Trash2, Users } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { EmptyState } from "@/components/empty-state"
@@ -133,12 +133,15 @@ export default function ProjectDetailPage() {
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [bpOpen, setBpOpen] = useState(false)
   const [bpChoice, setBpChoice] = useState("")
+  const [orgOpen, setOrgOpen] = useState(false)
+  const [orgChoice, setOrgChoice] = useState("")
   const [addMemberOpen, setAddMemberOpen] = useState(false)
   const [memberChoice, setMemberChoice] = useState("")
   const [memberRole, setMemberRole] = useState("MEMBER")
   const [memberToRemove, setMemberToRemove] = useState<MemberUser | null>(null)
 
   const bps = useAdminList<BillingProfile>("/admin/billing-profile", bpOpen)
+  const orgsList = useAdminList<{ id: string; name?: string }>("/admin/organizations", orgOpen)
   const users = useAdminList<AdminUser>("/admin/user", addMemberOpen)
 
   const externalServiceId = project?.services?.find((s) => s.serviceId)?.serviceId ?? ""
@@ -217,6 +220,28 @@ export default function ProjectDetailPage() {
       toast.success("Billing profile updated")
       setBpOpen(false)
       setBpChoice("")
+      invalidateProject()
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  // PUT /admin/project/{id} — assign/reassign the project's organization. Overwrites
+  // name/billingProfileId/organizationId together, so resend the current name + bp.
+  // Lets an operator adopt an imported (org-less) project into an organization.
+  const changeOrg = useMutation({
+    mutationFn: () =>
+      apiFetch(projectPath, {
+        method: "PUT",
+        body: {
+          name: project?.name ?? "",
+          organizationId: orgChoice,
+          billingProfileId: project?.billingProfileId ?? "",
+        },
+      }),
+    onSuccess: () => {
+      toast.success("Organization updated")
+      setOrgOpen(false)
+      setOrgChoice("")
       invalidateProject()
     },
     onError: (e: Error) => toast.error(e.message),
@@ -348,7 +373,7 @@ export default function ProjectDetailPage() {
                 <Field label="ID" value={project?.id} mono />
                 <div>
                   <p className="text-xs text-muted-foreground">Organization</p>
-                  <p className="mt-0.5 text-sm">
+                  <div className="mt-0.5 flex items-center gap-2 text-sm">
                     {project?.organizationId ? (
                       <Link
                         to={`/clients/organizations/${project.organizationId}`}
@@ -357,9 +382,13 @@ export default function ProjectDetailPage() {
                         {project.organizationId}
                       </Link>
                     ) : (
-                      "—"
+                      <span className="text-muted-foreground">None (imported / unassigned)</span>
                     )}
-                  </p>
+                    <Button variant="outline" size="sm" onClick={() => setOrgOpen(true)}>
+                      <Building2 />
+                      {project?.organizationId ? "Change" : "Assign"}
+                    </Button>
+                  </div>
                 </div>
                 <div>
                   <p className="text-xs text-muted-foreground">Billing profile</p>
@@ -668,6 +697,41 @@ export default function ProjectDetailPage() {
             </Button>
             <Button disabled={!bpChoice || changeBp.isPending} onClick={() => changeBp.mutate()}>
               {changeBp.isPending ? "Saving…" : "Assign billing profile"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={orgOpen} onOpenChange={setOrgOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Change organization</DialogTitle>
+            <DialogDescription>
+              Assigns this project to an organization. Useful for imported projects that arrived without one.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Select value={orgChoice} onValueChange={setOrgChoice}>
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder={orgsList.isLoading ? "Loading organizations…" : "Pick an organization"} />
+              </SelectTrigger>
+              <SelectContent>
+                {(orgsList.data?.data ?? []).map((o) =>
+                  o.id ? (
+                    <SelectItem key={o.id} value={o.id}>
+                      {o.name ? `${o.name} · ${o.id}` : o.id}
+                    </SelectItem>
+                  ) : null,
+                )}
+              </SelectContent>
+            </Select>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOrgOpen(false)}>
+              Cancel
+            </Button>
+            <Button disabled={!orgChoice || changeOrg.isPending} onClick={() => changeOrg.mutate()}>
+              {changeOrg.isPending ? "Saving…" : "Assign organization"}
             </Button>
           </DialogFooter>
         </DialogContent>

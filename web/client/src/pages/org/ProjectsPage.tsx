@@ -2,7 +2,7 @@ import { useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
-import { CreditCard, FolderKanban, MoreHorizontal, Pencil, Plus, Trash2, Undo2 } from "lucide-react"
+import { ArrowRightLeft, CreditCard, FolderKanban, MoreHorizontal, Pencil, Plus, Trash2, Undo2 } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { EmptyState } from "@/components/empty-state"
 import { StatusBadge } from "@/components/status-badge"
@@ -23,7 +23,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { apiFetch } from "@/lib/api"
 import { useProjectId, useProjects } from "@/lib/hooks"
-import type { BillingSummary, Project } from "@/lib/types"
+import type { BillingSummary, Organization, Project } from "@/lib/types"
 import { useOrg } from "./MembersPage"
 
 export default function ProjectsPage() {
@@ -33,8 +33,19 @@ export default function ProjectsPage() {
   const { data: projects, isLoading, error } = useProjects()
   const { org } = useOrg(pid)
 
+  // Every org the caller belongs to (same cache key as useOrg — no extra fetch),
+  // so create/move can target any of them, not just the current project's org.
+  const orgsQ = useQuery({
+    queryKey: ["organizations"],
+    queryFn: () => apiFetch<Organization[]>("/organizations"),
+  })
+  const orgs = orgsQ.data ?? []
+
   const [createOpen, setCreateOpen] = useState(false)
   const [newName, setNewName] = useState("")
+  const [createOrg, setCreateOrg] = useState("")
+  const [movingProj, setMovingProj] = useState<Project | null>(null)
+  const [moveOrg, setMoveOrg] = useState("")
   const [renaming, setRenaming] = useState<Project | null>(null)
   const [renameName, setRenameName] = useState("")
   const [deleting, setDeleting] = useState<Project | null>(null)
@@ -50,15 +61,33 @@ export default function ProjectsPage() {
 
   const invalidate = () => void qc.invalidateQueries({ queryKey: ["projects"] })
 
+  // The org a new project lands in: the explicit dialog pick, else the current
+  // project's org, else the first org the caller belongs to.
+  const createOrgId = createOrg || org?.id || orgs[0]?.id || ""
+
   const create = useMutation({
     mutationFn: () =>
-      apiFetch<Project>(`/project`, { method: "POST", body: { name: newName.trim(), organizationId: org?.id } }),
+      apiFetch<Project>(`/project`, { method: "POST", body: { name: newName.trim(), organizationId: createOrgId } }),
     onSuccess: (p) => {
       toast.success(`Project ${p.name} created`)
       setCreateOpen(false)
       setNewName("")
+      setCreateOrg("")
       invalidate()
       if (p?.id) navigate(`/p/${p.id}/dashboard`)
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  // PUT /project/{id}/organization — move a project to another org the caller belongs to.
+  const move = useMutation({
+    mutationFn: ({ p, orgId }: { p: Project; orgId: string }) =>
+      apiFetch(`/project/${p.id}/organization`, { method: "PUT", body: { organizationId: orgId } }),
+    onSuccess: () => {
+      toast.success("Project moved")
+      setMovingProj(null)
+      setMoveOrg("")
+      invalidate()
     },
     onError: (e: Error) => toast.error(e.message),
   })
@@ -126,7 +155,7 @@ export default function ProjectsPage() {
         title="Projects"
         description="All projects in this organization."
         actions={
-          <Button size="sm" onClick={() => setCreateOpen(true)} disabled={!org}>
+          <Button size="sm" onClick={() => setCreateOpen(true)} disabled={!orgs.length}>
             <Plus className="size-4" /> Create project
           </Button>
         }
@@ -144,7 +173,7 @@ export default function ProjectsPage() {
           title="No projects yet"
           hint="Create a project to start provisioning cloud resources."
           action={
-            <Button onClick={() => setCreateOpen(true)} disabled={!org}>
+            <Button onClick={() => setCreateOpen(true)} disabled={!orgs.length}>
               <Plus className="size-4" /> Create project
             </Button>
           }
@@ -196,6 +225,16 @@ export default function ProjectsPage() {
                         >
                           <CreditCard className="size-4" /> Change billing profile
                         </DropdownMenuItem>
+                        {orgs.length > 1 && (
+                          <DropdownMenuItem
+                            onClick={() => {
+                              setMoveOrg("")
+                              setMovingProj(p)
+                            }}
+                          >
+                            <ArrowRightLeft className="size-4" /> Move to organization
+                          </DropdownMenuItem>
+                        )}
                         {p.status === "SCHEDULED_FOR_DELETION" ? (
                           <DropdownMenuItem onClick={() => cancelDeletion.mutate(p)}>
                             <Undo2 className="size-4" /> Cancel deletion
@@ -221,15 +260,34 @@ export default function ProjectsPage() {
             <DialogTitle>Create project</DialogTitle>
             <DialogDescription>A new project in {org?.name ?? "your organization"}.</DialogDescription>
           </DialogHeader>
-          <div>
-            <Label className="mb-1.5 block">Project name</Label>
-            <Input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="my-project" />
+          <div className="space-y-3">
+            <div>
+              <Label className="mb-1.5 block">Project name</Label>
+              <Input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="my-project" />
+            </div>
+            {orgs.length > 1 && (
+              <div>
+                <Label className="mb-1.5 block">Organization</Label>
+                <Select value={createOrgId} onValueChange={setCreateOrg}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder="Pick an organization" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {orgs.map((o) => (
+                      <SelectItem key={o.id} value={o.id}>
+                        {o.name ?? o.id}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={() => create.mutate()} disabled={!newName.trim() || !org || create.isPending}>
+            <Button onClick={() => create.mutate()} disabled={!newName.trim() || !createOrgId || create.isPending}>
               {create.isPending ? "Creating…" : "Create project"}
             </Button>
           </DialogFooter>
@@ -331,6 +389,45 @@ export default function ProjectsPage() {
               disabled={!targetBp || changeBilling.isPending}
             >
               {changeBilling.isPending ? "Changing…" : "Change billing profile"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!movingProj} onOpenChange={(o) => !o && setMovingProj(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Move to organization</DialogTitle>
+            <DialogDescription>
+              Move {movingProj?.name} to another organization you belong to. Its resources and billing profile move with it.
+            </DialogDescription>
+          </DialogHeader>
+          <div>
+            <Label className="mb-1.5 block">Target organization</Label>
+            <Select value={moveOrg} onValueChange={setMoveOrg}>
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Pick an organization" />
+              </SelectTrigger>
+              <SelectContent>
+                {orgs
+                  .filter((o) => o.id !== movingProj?.organizationId)
+                  .map((o) => (
+                    <SelectItem key={o.id} value={o.id}>
+                      {o.name ?? o.id}
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setMovingProj(null)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => movingProj && move.mutate({ p: movingProj, orgId: moveOrg })}
+              disabled={!moveOrg || move.isPending}
+            >
+              {move.isPending ? "Moving…" : "Move project"}
             </Button>
           </DialogFooter>
         </DialogContent>
