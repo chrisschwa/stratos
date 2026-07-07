@@ -61,6 +61,15 @@ Each domain registers its own `Routes()` under `/api/v1` (see `AppRouter` in
 | `streaming` | SSE real-time event stream (`/events/{projectId}`) |
 | `os-notification`, `callbacks`, `payments`, `webhooks` | Inbound webhooks (public whitelist) |
 
+Project public-network policy: `GET /api/v1/project/{id}/public-networks` lists
+the external (public) networks the project is allowed to use, and
+`PUT /api/v1/admin/project/{id}/public-networks` (operator console surface) sets
+the per-project allow-list — a `null`/absent `publicNetworkIds` means all
+external networks. The cloud create body (`POST /api/v1/project/{id}/cloud`,
+type `SERVER`) additionally accepts optional `assignFloatingIp` /
+`floatingNetworkId` data keys to auto-attach a floating IP once the server has
+a port.
+
 ## Admin API — `/admin-api/v1`
 
 A machine-to-machine surface (`internal/platform/adminapi`). Authenticated with an

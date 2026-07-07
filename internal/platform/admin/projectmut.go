@@ -66,6 +66,7 @@ func (h *Handler) routeProjectMut(r chi.Router) {
 	r.Get("/project/{id}/external-service/{externalServiceId}", h.projectAddExternalService)
 	r.Post("/project/{id}/sync", h.projectSync)
 	r.Put("/project/{id}", h.projectUpdate)
+	r.Put("/project/{id}/public-networks", h.projectSetPublicNetworks)
 	r.Delete("/project/{id}", h.projectScheduleDeletion)
 	r.Delete("/project/{id}/now", h.projectDeleteNow)
 	r.Delete("/project/{id}/cancel", h.projectCancelDeletion)
@@ -530,6 +531,49 @@ type projectUpdateReq struct {
 	Name             string `json:"name"`
 	BillingProfileId string `json:"billingProfileId"`
 	OrganizationId   string `json:"organizationId"`
+}
+
+// projectSetPublicNetworks replaces a project's external-network allow-list
+// (PUT /{id}/public-networks): {"publicNetworkIds": ["net-id",...]} sets the list (empty array =
+// no external networks allowed); {"publicNetworkIds": null} unsets the field (default: all
+// allowed — nulls are dropped from the stored doc, not stored as literal nulls). Pure datastore;
+// the client cloud-create path enforces the list. The available networks come from the existing
+// GET /cloud-resource/public-networks/{externalServiceId} read.
+func (h *Handler) projectSetPublicNetworks(w http.ResponseWriter, r *http.Request) {
+	if !h.require(w, r, projectUpdatePerm) {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var req struct {
+		PublicNetworkIds *[]string `json:"publicNetworkIds"` // pointer: null/absent ≠ empty array
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
+		return
+	}
+	existing, ok := h.findProjectOr404(w, r, id)
+	if !ok {
+		return
+	}
+	before := maps.Clone(existing)
+	if req.PublicNetworkIds == nil {
+		if _, err := h.repo.SetAndUnsetFields(r.Context(), projectCollection, id, nil,
+			pgdoc.M{"publicNetworkIds": nil}); httpx.WriteError(w, err) {
+			return
+		}
+	} else {
+		if _, err := h.repo.SetFields(r.Context(), projectCollection, id,
+			pgdoc.M{"publicNetworkIds": *req.PublicNetworkIds}); httpx.WriteError(w, err) {
+			return
+		}
+	}
+	after, err := h.repo.FindDoc(r.Context(), projectCollection, id)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	// UPDATE PROJECT audit (the middleware diff carries the publicNetworkIds change).
+	audit.RecordSnapshots(r.Context(), before, after)
+	httpx.OK(w, shapeDoc(after))
 }
 
 // ── status (datastore flip + cloud suspend/resume integration point) ──────────────────────────────────
