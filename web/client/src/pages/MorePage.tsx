@@ -12,8 +12,8 @@ export function substituteUrlVariables(
   vars: { projectId: string; billingProfileId?: string; billingProfileEmail?: string; userEmail?: string },
 ): string {
   return url
-    .replaceAll("{{project.id}}", vars.projectId)
-    .replaceAll("{{billingProfile.id}}", vars.billingProfileId ?? "")
+    .replaceAll("{{project.id}}", encodeURIComponent(vars.projectId))
+    .replaceAll("{{billingProfile.id}}", encodeURIComponent(vars.billingProfileId ?? ""))
     .replaceAll("{{billingProfile.email}}", encodeURIComponent(vars.billingProfileEmail ?? ""))
     .replaceAll("{{user.email}}", encodeURIComponent(vars.userEmail ?? ""))
 }
