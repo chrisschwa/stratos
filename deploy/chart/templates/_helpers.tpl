@@ -60,7 +60,8 @@ app.kubernetes.io/component: {{ .component }}
 {{- if .Values.cnpg.enabled -}}
 {{- printf "%s-rw" (include "stratos.cnpgClusterName" .) -}}
 {{- else if .Values.postgresql.enabled -}}
-{{- printf "%s-postgresql" .Release.Name -}}
+{{- /* honor the subchart's fullnameOverride — that IS its service name */ -}}
+{{- .Values.postgresql.fullnameOverride | default (printf "%s-postgresql" .Release.Name) -}}
 {{- else -}}
 {{- required "externalPostgresql.host is required when postgresql.enabled=false" .Values.externalPostgresql.host -}}
 {{- end -}}
@@ -90,7 +91,8 @@ postgres://{{ $u }}:{{ $p }}@{{ include "stratos.pgHost" . }}:{{ .Values.externa
 {{/* RabbitMQ host: bundled subchart service, else the external host. */}}
 {{- define "stratos.rabbitHost" -}}
 {{- if .Values.rabbitmq.enabled -}}
-{{- printf "%s-rabbitmq" .Release.Name -}}
+{{- /* honor the subchart's fullnameOverride — that IS its service name */ -}}
+{{- .Values.rabbitmq.fullnameOverride | default (printf "%s-rabbitmq" .Release.Name) -}}
 {{- else -}}
 {{- required "externalRabbitmq.host is required when rabbitmq.enabled=false" .Values.externalRabbitmq.host -}}
 {{- end -}}
