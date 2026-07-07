@@ -1,0 +1,73 @@
+name: docker
+
+# Publishes the 3 Stratos images to GitHub Container Registry (ghcr.io):
+#   push to main   -> tag `dev-<short-sha>`
+#   push a git tag -> that tag name (e.g. v1.2.3)
+#   pull request   -> build only, no push
+#
+# Auth is the built-in GITHUB_TOKEN (packages: write) — no external secrets.
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: stratos
+            dockerfile: deploy/Dockerfile
+            context: .
+            build-args: ""
+          - image: stratos-web
+            dockerfile: web/Dockerfile
+            context: web
+            build-args: APP=client
+          - image: stratos-admin
+            dockerfile: web/Dockerfile
+            context: web
+            build-args: APP=admin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tag
+        id: meta
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: ${{ github.event_name == 'push' }}
+          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ steps.meta.outputs.tag }}
+          build-args: ${{ matrix.build-args }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

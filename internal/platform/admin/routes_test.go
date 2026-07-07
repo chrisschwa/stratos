@@ -1,0 +1,19 @@
+package admin
+
+import (
+	"testing"
+
+	"github.com/go-chi/chi/v5"
+)
+
+// TestRoutesNoPanic registers the entire admin route tree on a fresh chi router and asserts it does
+// not panic. chi panics at registration time on conflicting sibling param names or duplicate routes
+// — this is the guard that catches such conflicts as new controllers are wired into Routes().
+func TestRoutesNoPanic(t *testing.T) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			t.Fatalf("admin Routes() panicked at registration: %v", rec)
+		}
+	}()
+	(&Handler{}).Routes(chi.NewRouter())
+}

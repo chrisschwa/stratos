@@ -1,0 +1,289 @@
+import { useState } from "react"
+import { useMutation, useQueryClient } from "@tanstack/react-query"
+import { toast } from "sonner"
+import { Cable, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react"
+import { PageHeader } from "@/components/layout/PageHeader"
+import { EmptyState } from "@/components/empty-state"
+import { StatusBadge } from "@/components/status-badge"
+import { Button } from "@/components/ui/button"
+import { Card } from "@/components/ui/card"
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select"
+import { Skeleton } from "@/components/ui/skeleton"
+import { Switch } from "@/components/ui/switch"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { apiFetch } from "@/lib/api"
+import { useCloudList, useCloudScope, useProjectId } from "@/lib/hooks"
+import type { CloudResource } from "@/lib/types"
+import { networkName } from "./NetworksPage"
+
+function portName(r: CloudResource): string {
+  return (r.data?.port?.name as string) || r.name || r.id
+}
+function portFixedIPs(r: CloudResource): string {
+  const ips = (r.data?.port?.fixed_ips as Array<{ ip_address?: string }> | undefined) ?? []
+  return ips.map((f) => f.ip_address).filter(Boolean).join(", ") || "—"
+}
+
+export default function PortsPage() {
+  const pid = useProjectId()
+  const scope = useCloudScope(pid)
+  const qc = useQueryClient()
+  const { data, isLoading, refetch, isFetching, error } = useCloudList(pid, "PORT")
+  const { data: networks } = useCloudList(pid, "NETWORK")
+  const [createOpen, setCreateOpen] = useState(false)
+  const [toDelete, setToDelete] = useState<CloudResource | null>(null)
+
+  const [name, setName] = useState("")
+  const [networkId, setNetworkId] = useState("")
+  const [fixedIp, setFixedIp] = useState("")
+
+  // Edit dialog (Go TypePort UPDATE reads exactly: name?, portSecurityEnabled?, securityGroups? —
+  // adminStateUp is NOT read; securityGroups editing is omitted here, disabling port security
+  // force-clears them server-side).
+  const [editTarget, setEditTarget] = useState<CloudResource | null>(null)
+  const [editName, setEditName] = useState("")
+  const [editPortSec, setEditPortSec] = useState(true)
+
+  const invalidate = () => void qc.invalidateQueries({ queryKey: ["cloud", pid, "PORT"] })
+
+  const openEdit = (r: CloudResource) => {
+    setEditName((r.data?.port?.name as string) ?? "")
+    setEditPortSec((r.data?.port?.port_security_enabled as boolean) !== false)
+    setEditTarget(r)
+  }
+
+  const update = useMutation({
+    mutationFn: (r: CloudResource) =>
+      apiFetch(`/project/${pid}/cloud/${r.id}/action`, {
+        method: "POST",
+        cloud: scope,
+        body: { action: "UPDATE", data: { name: editName, portSecurityEnabled: editPortSec } },
+      }),
+    onSuccess: () => {
+      toast.success("Port updated")
+      setEditTarget(null)
+      invalidate()
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const create = useMutation({
+    mutationFn: () => {
+      const data: Record<string, unknown> = { name, networkId }
+      if (fixedIp) data.fixedIp = fixedIp
+      return apiFetch(`/project/${pid}/cloud`, {
+        method: "POST",
+        cloud: scope,
+        body: { type: "PORT", data },
+      })
+    },
+    onSuccess: () => {
+      toast.success(`Port "${name}" created`)
+      setCreateOpen(false)
+      setName("")
+      setFixedIp("")
+      invalidate()
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const del = useMutation({
+    mutationFn: (r: CloudResource) =>
+      apiFetch(`/project/${pid}/cloud/${r.id}`, { method: "DELETE", cloud: scope }),
+    onSuccess: () => {
+      toast.success("Port deletion requested")
+      setToDelete(null)
+      setTimeout(invalidate, 1500)
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  return (
+    <>
+      <PageHeader
+        title="Ports"
+        description="Network interfaces in this project."
+        actions={
+          <>
+            <Button variant="outline" size="sm" onClick={() => void refetch()} disabled={isFetching}>
+              <RefreshCw className={isFetching ? "size-4 animate-spin" : "size-4"} />
+            </Button>
+            <Button size="sm" onClick={() => setCreateOpen(true)}>
+              <Plus className="size-4" /> Create port
+            </Button>
+          </>
+        }
+      />
+
+      {isLoading ? (
+        <Skeleton className="h-64" />
+      ) : error ? (
+        <div className="rounded-lg border bg-muted/40 p-6 text-sm text-muted-foreground">{(error as Error).message}</div>
+      ) : !data?.length ? (
+        <EmptyState
+          icon={Cable}
+          title="No ports"
+          hint="Ports appear here when servers attach to networks, or create one directly."
+          action={
+            <Button onClick={() => setCreateOpen(true)}>
+              <Plus className="size-4" /> Create port
+            </Button>
+          }
+        />
+      ) : (
+        <Card className="overflow-hidden py-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name / ID</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>MAC address</TableHead>
+                <TableHead>Fixed IPs</TableHead>
+                <TableHead>Device</TableHead>
+                <TableHead className="w-20" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data.map((r) => {
+                const p = (r.data?.port ?? {}) as Record<string, unknown>
+                return (
+                  <TableRow key={r.id}>
+                    <TableCell>
+                      <span className="font-medium">{portName(r)}</span>
+                      <div className="font-mono text-xs text-muted-foreground">{(p.id as string) ?? r.externalId}</div>
+                    </TableCell>
+                    <TableCell>
+                      <StatusBadge status={(p.status as string) ?? r.status} />
+                    </TableCell>
+                    <TableCell className="font-mono text-sm">{(p.mac_address as string) ?? "—"}</TableCell>
+                    <TableCell className="font-mono text-sm">{portFixedIPs(r)}</TableCell>
+                    <TableCell className="text-sm text-muted-foreground">{(p.device_owner as string) || "—"}</TableCell>
+                    <TableCell>
+                      <div className="flex justify-end gap-1">
+                        <Button variant="ghost" size="icon" onClick={() => openEdit(r)} aria-label="Edit port">
+                          <Pencil className="size-4 text-muted-foreground" />
+                        </Button>
+                        <Button variant="ghost" size="icon" onClick={() => setToDelete(r)} aria-label="Delete port">
+                          <Trash2 className="size-4 text-muted-foreground" />
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
+            </TableBody>
+          </Table>
+        </Card>
+      )}
+
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Create port</DialogTitle>
+            <DialogDescription>A network interface on one of your networks.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-2">
+            <div className="grid gap-2">
+              <Label htmlFor="port-name">Name</Label>
+              <Input id="port-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-port" />
+            </div>
+            <div className="grid gap-2">
+              <Label>Network</Label>
+              <Select value={networkId} onValueChange={setNetworkId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a network" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(networks ?? []).map((n) => {
+                    const ext = n.externalId ?? (n.data?.network?.id as string) ?? n.id
+                    return (
+                      <SelectItem key={n.id} value={ext}>
+                        {networkName(n)}
+                      </SelectItem>
+                    )
+                  })}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="port-ip">Fixed IP (optional)</Label>
+              <Input
+                id="port-ip"
+                className="font-mono"
+                value={fixedIp}
+                onChange={(e) => setFixedIp(e.target.value)}
+                placeholder="10.0.0.10"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCreateOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={() => create.mutate()} disabled={!name || !networkId || create.isPending}>
+              {create.isPending ? "Creating…" : "Create port"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!editTarget} onOpenChange={(o) => !o && setEditTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit port</DialogTitle>
+            <DialogDescription>Update the port's name and port security.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-2">
+            <div className="grid gap-2">
+              <Label htmlFor="edit-port-name">Name</Label>
+              <Input id="edit-port-name" value={editName} onChange={(e) => setEditName(e.target.value)} />
+            </div>
+            <div className="flex items-center justify-between gap-4">
+              <div className="grid gap-1">
+                <Label htmlFor="edit-port-sec">Port security</Label>
+                <p className="text-xs text-muted-foreground">
+                  Disabling port security removes all security groups from this port.
+                </p>
+              </div>
+              <Switch id="edit-port-sec" checked={editPortSec} onCheckedChange={setEditPortSec} />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditTarget(null)}>
+              Cancel
+            </Button>
+            <Button onClick={() => editTarget && update.mutate(editTarget)} disabled={update.isPending}>
+              {update.isPending ? "Saving…" : "Save changes"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!toDelete} onOpenChange={(o) => !o && setToDelete(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete port</DialogTitle>
+            <DialogDescription>
+              Delete port "{toDelete ? portName(toDelete) : ""}"? This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setToDelete(null)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={() => toDelete && del.mutate(toDelete)} disabled={del.isPending}>
+              {del.isPending ? "Deleting…" : "Delete port"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  )
+}

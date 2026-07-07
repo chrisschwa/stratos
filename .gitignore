@@ -1,0 +1,32 @@
+/bin/
+*.exe
+*.out
+*.test
+.env
+vendor/
+
+# Frontend
+node_modules/
+dist/
+
+# Deployment value overlays — env-specific, may carry secrets. Keep LOCAL only.
+# (deploy/stratos-helm/values.yaml + values.sample.yaml stay tracked — those are
+# the chart defaults/sample, no secrets.)
+/deploy/stratos-values.yaml
+/deploy/stratos-cloud-values.yaml
+/deploy/stratos-final-test-values.yaml
+/deploy/values-go-test.yaml
+/deploy/values-reference.yaml
+
+# Internal engineering log / pairing handoff — not for the public repo.
+/CLAUDE.md
+
+# Vendored Helm subchart archives — pulled by `helm dependency build` from Chart.lock.
+/deploy/chart/charts/*.tgz
+
+# Internal task log — not for the public repo.
+/tasks/
+
+# Internal migration working notes — not for the public repo.
+/MIGRATION_PLAN.md
+/_audit/

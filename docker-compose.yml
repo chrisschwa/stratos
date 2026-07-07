@@ -1,0 +1,95 @@
+# Local dev stack: the 3 Stratos images + PostgreSQL + RabbitMQ.
+#   docker compose up --build
+# API  -> http://localhost:8080 (mgmt http://localhost:8081)
+# Web  -> http://localhost:8082   Admin -> http://localhost:8083
+#
+# ponytail: no bundled Keycloak/OpenStack — auth-gated + cloud routes need an
+# external issuer/region. Put OS_* and *_OAUTH2_* in a .env file (see below).
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: stratos
+      POSTGRES_PASSWORD: stratos
+      POSTGRES_DB: stratos
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    restart: unless-stopped
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  api:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    image: registry.menlo.ai/library/stratos:dev
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - rabbitmq
+    environment:
+      STRATOS_DB_URL: postgres://stratos:stratos@postgres:5432/stratos?sslmode=disable
+      STRATOS_RABBITMQ_HOST: rabbitmq
+      STRATOS_RABBITMQ_PORT: "5672"
+      STRATOS_RABBITMQ_USERNAME: guest
+      STRATOS_RABBITMQ_PASSWORD: guest
+      STRATOS_ENCRYPTION_DEFAULT_KEY: dev-encryption-key-change-me
+      STRATOS_SELF_API_BASE_URL: http://localhost:8080
+      STRATOS_SELF_UI_BASE_URL: http://localhost:8082
+      STRATOS_SELF_ADMIN_BASE_URL: http://localhost:8083
+      STRATOS_JOBS_DEBUG_TRIGGERS: "true"
+      # OpenStack (optional; the cloud client stays down without these).
+      OS_AUTH_URL: ${OS_AUTH_URL:-}
+      OS_REGION_NAME: ${OS_REGION_NAME:-}
+      OS_USERNAME: ${OS_USERNAME:-}
+      OS_PASSWORD: ${OS_PASSWORD:-}
+      OS_USER_DOMAIN_NAME: ${OS_USER_DOMAIN_NAME:-}
+      OS_PROJECT_NAME: ${OS_PROJECT_NAME:-}
+      OS_PROJECT_DOMAIN_NAME: ${OS_PROJECT_DOMAIN_NAME:-}
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+
+  web:
+    build:
+      context: web
+      dockerfile: Dockerfile
+      args:
+        APP: client
+    image: registry.menlo.ai/library/stratos-web:dev
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      STRATOS_API_URL: http://localhost:8080/api/v1
+      STRATOS_OAUTH2_ISSUER: ${STRATOS_OAUTH2_ISSUER:-}
+      STRATOS_OAUTH2_CLIENT_ID: ${STRATOS_OAUTH2_CLIENT_ID:-}
+    ports:
+      - "8082:80"
+
+  admin:
+    build:
+      context: web
+      dockerfile: Dockerfile
+      args:
+        APP: admin
+    image: registry.menlo.ai/library/stratos-admin:dev
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      STRATOS_API_URL: http://localhost:8080/api/v1
+      STRATOS_OAUTH2_ISSUER: ${STRATOS_ADMIN_OAUTH2_ISSUER:-}
+      STRATOS_OAUTH2_CLIENT_ID: ${STRATOS_ADMIN_OAUTH2_CLIENT_ID:-stratos-admin}
+    ports:
+      - "8083:80"
+
+volumes:
+  postgres-data:

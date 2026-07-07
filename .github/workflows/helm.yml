@@ -1,0 +1,77 @@
+name: helm
+
+# Chart release for deploy/chart — tag-driven, unified with the image tags:
+#   - PR (chart paths): lint + template only.
+#   - push tag v*:      package the chart at that version (v0.1.2 -> 0.1.2) and
+#                       push to oci://ghcr.io/<owner>/charts. Idempotent: skips
+#                       if that chart version is already in the registry.
+#
+# The git tag is the single source of truth for the released version — the app
+# images and the chart share the same vX.Y.Z tag. Chart.yaml `version:` is only a
+# local/dev default; the tag overrides it at package time.
+on:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'deploy/chart/**'
+
+env:
+  CHART_DIR: deploy/chart
+  CHART_NAME: stratos
+  OCI_REPO: oci://ghcr.io/${{ github.repository_owner }}/charts
+
+jobs:
+  # ---- PR: sanity only ------------------------------------------------------
+  lint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: ghcr login (for OCI helm deps)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Lint + template
+        run: |
+          set -euo pipefail
+          helm dependency build "$CHART_DIR"
+          helm lint "$CHART_DIR"
+          helm template "$CHART_DIR" >/dev/null
+
+  # ---- tag v*: package + publish the chart at the tag version (idempotent) ---
+  publish:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # push the OCI chart artifact
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: ghcr login
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Package + publish chart at the tag version
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"          # v0.1.2 -> 0.1.2
+          if helm show chart "$OCI_REPO/$CHART_NAME" --version "$version" >/dev/null 2>&1; then
+            echo "chart $CHART_NAME $version already published — nothing to do."
+            exit 0
+          fi
+          helm dependency build "$CHART_DIR"
+          helm lint "$CHART_DIR"
+          helm template "$CHART_DIR" >/dev/null
+          helm package "$CHART_DIR" -d /tmp/pkg --version "$version" --app-version "$version"
+          helm push "/tmp/pkg/$CHART_NAME-$version.tgz" "$OCI_REPO"

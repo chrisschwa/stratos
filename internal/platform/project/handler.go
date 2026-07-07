@@ -1,0 +1,542 @@
+package project
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/menlocloud/stratos/internal/cloud"
+	"github.com/menlocloud/stratos/internal/cloud/client"
+	"github.com/menlocloud/stratos/internal/platform/audit"
+	"github.com/menlocloud/stratos/internal/platform/billing"
+	"github.com/menlocloud/stratos/internal/platform/externalservice"
+	"github.com/menlocloud/stratos/internal/platform/org"
+	"github.com/menlocloud/stratos/internal/platform/pricing"
+	"github.com/menlocloud/stratos/internal/platform/rbac"
+	"github.com/menlocloud/stratos/internal/platform/user"
+	"github.com/menlocloud/stratos/pkg/httpx"
+)
+
+type Handler struct {
+	svc     *Service
+	policy  *Policy
+	orgSvc  *org.Service
+	users   *user.Repo
+	audit   *audit.Service
+	billing *billing.Repo
+	cloud   *cloud.Repo
+	esSvc   *externalservice.Service
+	// pricing + engine back the client price-preview (/pricing/{projectId}/service/{esId}[/types]):
+	// rate a BillingResource against the project's price plans.
+	pricing *pricing.Repo
+	engine  *pricing.Engine
+	// metadata reads the admin-configured instanceMetadataOption collection for the create-form
+	// metadata panel.
+	metadata *InstanceMetadataReader
+	// cloudClient resolves the live CloudClient (nil until OpenStack auth completes, or when
+	// no cloud is configured) — the cloud write endpoints 503 until it is ready. cloudRegion is
+	// the single configured region stamped on created CloudResources.
+	cloudClient func() *client.Client
+	cloudRegion string
+	// downloads mints/resolves short-lived cloud-object download tokens (object-store DOWNLOAD →
+	// GET /download/{token}); apiBaseURL builds the token URL. Set via SetDownloads (nil-safe).
+	downloads  *cloud.DownloadRepo
+	apiBaseURL string
+	// customMenu feeds admin Custom Menu items into the /init menu (nil-safe;
+	// merged into the menu build). Set via SetCustomMenu.
+	customMenu *CustomMenuReader
+}
+
+// SetCustomMenu wires the customMenuItem reader into the /init menu build.
+func (h *Handler) SetCustomMenu(r *CustomMenuReader) { h.customMenu = r }
+
+// SetDownloads wires the cloud-download token repo + the api base URL for the object DOWNLOAD action.
+func (h *Handler) SetDownloads(d *cloud.DownloadRepo, apiBaseURL string) {
+	h.downloads, h.apiBaseURL = d, apiBaseURL
+}
+
+func NewHandler(svc *Service, policy *Policy, orgSvc *org.Service, users *user.Repo, a *audit.Service, billingRepo *billing.Repo, cloudRepo *cloud.Repo, esSvc *externalservice.Service, pricingRepo *pricing.Repo, metadata *InstanceMetadataReader, cloudClient func() *client.Client, cloudRegion string) *Handler {
+	return &Handler{svc: svc, policy: policy, orgSvc: orgSvc, users: users, audit: a, billing: billingRepo, cloud: cloudRepo, esSvc: esSvc, pricing: pricingRepo, engine: pricing.NewEngine(nil), metadata: metadata, cloudClient: cloudClient, cloudRegion: cloudRegion}
+}
+
+// projectAudit emits a PROJECT event from a client (clientUser) action.
+func (h *Handler) projectAudit(u *user.User, p *Project, action string) {
+	ev := audit.ClientUserEvent(u.Sub, u.FullName())
+	ev.EventContext = audit.ContextProject
+	ev.Action = action
+	ev.ResourceType = audit.ResourceProject
+	ev.ResourceID = p.ID
+	ev.ResourceDisplayName = p.Name
+	ev.OrganizationID = p.OrganizationID
+	ev.ProjectID = p.ID
+	ev.Outcome = audit.OutcomeSuccess
+	h.audit.LogAsync(ev)
+}
+
+// Routes registers the project endpoints under the /api/v1 group (the platform
+// subset; cloud/billing-usage endpoints are deferred).
+func (h *Handler) Routes(r chi.Router) {
+	r.Get("/project", h.list)
+	r.Post("/project", h.create)
+	r.Get("/project/{id}", h.get)
+	r.Delete("/project/{id}", h.scheduleDeletion)
+	r.Delete("/project/{id}/now", h.deleteNow)
+	r.Delete("/project/{id}/cancel", h.cancelDeletion)
+	r.Post("/project/{id}/rename", h.rename)
+	r.Put("/project/{id}/organization", h.updateOrganization)
+	r.Get("/project/{id}/members", h.getMembers)
+	r.Post("/project/{id}/members", h.addUserToProject)
+	r.Delete("/project/{id}/members", h.removeUserFromProject)
+	r.Get("/project/{id}/billing", h.billingSummary)
+	// POST /{id}/billing/{billingProfileId} → swap the project's billing profile
+	// (validity-gated on both profiles).
+	r.Post("/project/{id}/billing/{billingProfileId}", h.changeBillingProfile)
+	r.Get("/project/{id}/resources/counts", h.resourceCounts)
+	r.Get("/project/{id}/resource/count", h.resourceStats)
+	r.Get("/project/{id}/resource-types", h.resourceTypes)
+	r.Get("/project/{id}/instance-metadata-options", h.instanceMetadataOptions)
+	// Price-preview (create forms) — empty when billingResources is empty (the
+	// wizard sends []) or the rating preview is deferred; 200-empty, not 404, so the FE renders.
+	r.Post("/pricing/{projectId}/service/{externalServiceId}", h.pricingSingle)
+	r.Post("/pricing/{projectId}/service/{externalServiceId}/types", h.pricingTypes)
+	// Client cloud read/glue surface (dashboard bootstrap) — see clientcloud.go.
+	r.Get("/init/{projectId}", h.initUI)
+	r.Get("/search/{projectId}", h.search)
+	r.Get("/project/{projectId}/service", h.projectServices)
+	// Service get / auth (by service id). chi: the position-3
+	// param reuses the sibling {serviceType} node name; both handlers read it as the service id.
+	r.Get("/project/{projectId}/service/{serviceType}", h.projectServiceByID)
+	r.Post("/project/{projectId}/service/{serviceType}/auth", h.projectServiceAuth)
+	r.Get("/project/{projectId}/service/{serviceType}/location", h.projectLocations)
+	r.Get("/project/{id}/service/details", h.projectServiceDetails)
+	r.Get("/project/{id}/cost-info", h.projectCostInfo)
+	r.Post("/project/{id}/init", h.projectInit)
+	// POST /{id}/resource?type= → cached resources filtered by type.
+	r.Post("/project/{id}/resource", h.cloudResourceList)
+	// GET /{projectId}/cloud/{id} → one cached resource (live-refreshed).
+	r.Get("/project/{id}/cloud/{resourceId}", h.cloudGet)
+	// cloud writes (project:cloud_resource:manage gated; INTERNAL network only).
+	r.Post("/project/{id}/cloud", h.cloudCreate)
+	r.Delete("/project/{id}/cloud/{resourceId}", h.cloudDelete)
+	r.Post("/project/{id}/cloud/{resourceId}/action", h.cloudAction)
+	// PUT /{id}/cloud/{serverId}/metadata → replace nova metadata.
+	r.Put("/project/{id}/cloud/{resourceId}/metadata", h.cloudMetadata)
+	// POST /{id}/cloud/{resourceId}/upload-bucket-file
+	// ?objectName= with the raw file body → stream into the Swift bucket (204).
+	r.Post("/project/{id}/cloud/{resourceId}/upload-bucket-file", h.cloudUploadBucketFile)
+	// Image upload: POST /{id}/image/{imageId}/upload (raw body → glance).
+	// The canonical route lives at /api/v1/openstack/{projectId}/... — both paths serve the same
+	// handler (the /project alias is legacy; old-UI clients call the /openstack path).
+	r.Post("/project/{id}/image/{imageId}/upload", h.cloudImageUpload)
+	r.Post("/openstack/{id}/image/{imageId}/upload", h.cloudImageUpload)
+	// Download: GET /download/{token} streams a cloud object (whitelisted; token=auth).
+	r.Get("/download/{token}", h.cloudObjectDownload)
+	// Collection-level action: catalog actions for the create wizard
+	// (PUBLIC_IMAGES, LIST_AVAILABILITY_ZONES) — must precede no static segment so it doesn't
+	// collide with /{resourceId}/action (chi: static "action" wins over the {resourceId} param).
+	r.Post("/project/{id}/cloud/action", h.cloudBulkAction)
+}
+
+// billingSummary returns the project's billing-profile summary. Project-membership-gated via
+// GetProject; the profile id is the project's own (if set) else the owning org's.
+func (h *Handler) billingSummary(w http.ResponseWriter, r *http.Request) {
+	u, err := h.users.Require(r.Context(), httpx.RC(r.Context()).Sub)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	p, err := h.svc.GetProject(r.Context(), u.Sub, chi.URLParam(r, "id"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	bpID := p.BillingProfileID
+	if bpID == "" {
+		o, err := h.orgSvc.FindOrganization(r.Context(), p.OrganizationID)
+		if err != nil {
+			h.fail(w, err)
+			return
+		}
+		if o == nil {
+			h.fail(w, httpx.NotFound("Organization not found"))
+			return
+		}
+		bpID = o.BillingProfileID
+	}
+	bp, err := h.billing.FindByID(r.Context(), bpID)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	if bp == nil {
+		h.fail(w, httpx.NotFound("Billing profile not found"))
+		return
+	}
+	httpx.OK(w, billing.ToSummary(bp).WithFinancials(r.Context(), h.billing, time.Now().UTC()))
+}
+
+// changeBillingProfile handles POST /{id}/billing/{bpId}: PROJECT_UPDATE gate, then BOTH profiles
+// must be valid for changing (negative balance or SUSPENDED → 400). The current profile is the
+// project's own billingProfileId by-id 404 (no org fallback); the target resolves through the
+// getBillingProfile(sub,id) read gate (bp 404 → org 404 → BILLING_PROFILE_READ 403). Then the
+// project status is synced (NEW/SUSPENDED → DISABLED, ACTIVE → ENABLED) + the billingProfileId swap.
+// A live nova pause/unpause would follow when the status actually flips; the flip persists DB-only
+// here.
+// ponytail: live per-project suspend on flip not driven — extract billingCloudSuspender's
+// per-project leg (cmd/api) if this path ever needs it.
+func (h *Handler) changeBillingProfile(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	proj, ok := h.project(w, r, u, rbac.ProjectUpdate)
+	if !ok {
+		return
+	}
+	now := time.Now().UTC()
+	bal := billing.NewBalanceService(h.billing)
+	// Current profile = the project's own, else the owning org's (the raw-field read 404s/500s
+	// on the blank field greenfield projects carry, so the effective-profile fallback is used).
+	curID := proj.BillingProfileID
+	if curID == "" {
+		if o, err := h.orgSvc.FindOrganization(r.Context(), proj.OrganizationID); err == nil && o != nil {
+			curID = o.BillingProfileID
+		}
+	}
+	cur, err := h.billing.FindByID(r.Context(), curID)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	if cur == nil {
+		h.fail(w, httpx.NotFound(fmt.Sprintf("Billing profile with id %s not found. ", curID)))
+		return
+	}
+	if err := profileValidForChanging(r.Context(), bal, cur, now); err != nil {
+		h.fail(w, err)
+		return
+	}
+	// Target profile through the getBillingProfile(sub,id) gate.
+	bpID := chi.URLParam(r, "billingProfileId")
+	target, err := h.billing.FindByID(r.Context(), bpID)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	if target == nil {
+		h.fail(w, httpx.NotFound(fmt.Sprintf("Billing profile with id %s not found. ", bpID)))
+		return
+	}
+	// The target profile must belong to the project's OWN organization — a profile from any other
+	// org must never be attachable (cross-org billing hijack, even with read on that other org).
+	if !sameOrgBillingProfile(target, proj) {
+		h.fail(w, httpx.Forbidden("The billing profile does not belong to this project's organization"))
+		return
+	}
+	o, err := h.orgSvc.FindOrganization(r.Context(), target.OrganizationID)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	if o == nil {
+		h.fail(w, httpx.NotFound("Billing Profile has no organization associated"))
+		return
+	}
+	// Attaching a profile mutates the project's billing — gate on the stronger update permission,
+	// not the read gate.
+	if err := h.policy.RequireOrgPermission(r.Context(), u.Sub, o.ID, rbac.BillingProfileUpdate); err != nil {
+		h.fail(w, err)
+		return
+	}
+	if err := profileValidForChanging(r.Context(), bal, target, now); err != nil {
+		h.fail(w, err)
+		return
+	}
+	// syncProjectStatusByBillingProfile: NEW/SUSPENDED → DISABLED, ACTIVE → ENABLED.
+	switch target.Status {
+	case billing.StatusNew, billing.StatusSuspended:
+		proj.Status = StatusDisabled
+	case billing.StatusActive:
+		proj.Status = StatusEnabled
+	}
+	proj.BillingProfileID = target.ID
+	if err := h.svc.Save(r.Context(), proj); err != nil {
+		h.fail(w, err)
+		return
+	}
+	httpx.OK(w, *proj)
+}
+
+// sameOrgBillingProfile reports whether a target billing profile belongs to the project's own
+// organization — the cross-org attach guard for changeBillingProfile.
+func sameOrgBillingProfile(target *billing.BillingProfile, proj *Project) bool {
+	return target != nil && proj != nil && target.OrganizationID == proj.OrganizationID
+}
+
+// profileValidForChanging: current balance < 0 or a SUSPENDED profile blocks the change with the
+// translated message (trailing space included).
+func profileValidForChanging(ctx context.Context, bal *billing.BalanceService, bp *billing.BillingProfile, now time.Time) error {
+	b, err := bal.CurrentBalance(ctx, bp.ID, now)
+	if err != nil {
+		return err
+	}
+	if b.IsNegative() || bp.Status == billing.StatusSuspended {
+		return httpx.BadRequest("The billing profile is not valid for changing. ")
+	}
+	return nil
+}
+
+func (h *Handler) fail(w http.ResponseWriter, err error) {
+	if !httpx.WriteError(w, err) {
+		slog.Error("project handler internal error", "err", err)
+		httpx.Err(w, http.StatusInternalServerError, 500, "internal.error")
+	}
+}
+
+// principal loads the initialized User (400 if not).
+func (h *Handler) principal(w http.ResponseWriter, r *http.Request) (*user.User, bool) {
+	u, err := h.users.Require(r.Context(), httpx.RC(r.Context()).Sub)
+	if err != nil {
+		h.fail(w, err)
+		return nil, false
+	}
+	return u, true
+}
+
+func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	views, err := h.svc.ListForSub(r.Context(), u.Sub)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	httpx.List(w, views)
+}
+
+func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Name           string   `json:"name"`
+		OrganizationID string   `json:"organizationId"`
+		MemberSubs     []string `json:"memberSubs"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	o, err := h.orgSvc.GetOrganizationForUser(r.Context(), req.OrganizationID, u.Sub)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	if err := h.policy.RequireOrgPermission(r.Context(), u.Sub, o.ID, rbac.ProjectCreate); err != nil {
+		h.fail(w, err)
+		return
+	}
+	p, err := h.svc.CreateProject(r.Context(), u.Sub, req.Name, o.ID, req.MemberSubs)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	h.projectAudit(u, p, audit.ActionCreate)
+	httpx.OK(w, *p)
+}
+
+func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	p, err := h.svc.GetProject(r.Context(), u.Sub, chi.URLParam(r, "id"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	httpx.OK(w, *p)
+}
+
+// project loads a project the user is a member of and enforces a project-level
+// permission, returning the project on success. Centralizes the gate shared by
+// the mutating endpoints. On failure it has already written the response.
+func (h *Handler) project(w http.ResponseWriter, r *http.Request, u *user.User, permKey string) (*Project, bool) {
+	p, err := h.svc.GetProject(r.Context(), u.Sub, chi.URLParam(r, "id"))
+	if err != nil {
+		h.fail(w, err)
+		return nil, false
+	}
+	if err := h.policy.RequireProjectPermission(r.Context(), u.Sub, p, permKey); err != nil {
+		h.fail(w, err)
+		return nil, false
+	}
+	return p, true
+}
+
+func (h *Handler) scheduleDeletion(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	proj, ok := h.project(w, r, u, rbac.ProjectDelete)
+	if !ok {
+		return
+	}
+	p, err := h.svc.ScheduleDeletion(r.Context(), proj, r.URL.Query().Get("cascade") == "true")
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	h.projectAudit(u, p, audit.ActionDelete)
+	_, _ = h.users.DeleteCustomInfo(r.Context(), u.Sub, "lastProject")
+	httpx.OK(w, *p)
+}
+
+func (h *Handler) deleteNow(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	proj, ok := h.project(w, r, u, rbac.ProjectDelete)
+	if !ok {
+		return
+	}
+	p, err := h.svc.DeleteNow(r.Context(), proj.ID)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	_, _ = h.users.DeleteCustomInfo(r.Context(), u.Sub, "lastProject")
+	httpx.OK(w, *p)
+}
+
+func (h *Handler) cancelDeletion(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	proj, ok := h.project(w, r, u, rbac.ProjectUpdate)
+	if !ok {
+		return
+	}
+	p, err := h.svc.CancelDeletion(r.Context(), proj.ID)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	_, _ = h.users.DeleteCustomInfo(r.Context(), u.Sub, "lastProject")
+	httpx.OK(w, *p)
+}
+
+func (h *Handler) rename(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	proj, ok := h.project(w, r, u, rbac.ProjectUpdate)
+	if !ok {
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	p, err := h.svc.Rename(r.Context(), u.Sub, proj.ID, req.Name)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	h.projectAudit(u, p, audit.ActionUpdate)
+	httpx.OK(w, *p)
+}
+
+func (h *Handler) updateOrganization(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	proj, ok := h.project(w, r, u, rbac.ProjectUpdate)
+	if !ok {
+		return
+	}
+	var req struct {
+		OrganizationID string `json:"organizationId"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	// Validate the user is a member of the TARGET org.
+	target, err := h.orgSvc.GetOrganizationForUser(r.Context(), req.OrganizationID, u.Sub)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	p, err := h.svc.UpdateOrganization(r.Context(), u.Sub, proj.ID, target.ID)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	httpx.OK(w, *p)
+}
+
+func (h *Handler) getMembers(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	// Membership check only (no extra permission gate).
+	proj, err := h.svc.GetProject(r.Context(), u.Sub, chi.URLParam(r, "id"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	members, err := h.svc.Members(r.Context(), proj)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	httpx.List(w, members)
+}
+
+func (h *Handler) addUserToProject(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	proj, ok := h.project(w, r, u, rbac.ProjectManageMembers)
+	if !ok {
+		return
+	}
+	var req struct {
+		UserSub string `json:"userSub"`
+		Role    string `json:"role"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	p, err := h.svc.AddMember(r.Context(), proj.ID, req.UserSub, req.Role)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	httpx.OK(w, *p)
+}
+
+func (h *Handler) removeUserFromProject(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	proj, ok := h.project(w, r, u, rbac.ProjectManageMembers)
+	if !ok {
+		return
+	}
+	p, err := h.svc.RemoveMember(r.Context(), proj.ID, r.URL.Query().Get("sub"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	httpx.OK(w, *p)
+}

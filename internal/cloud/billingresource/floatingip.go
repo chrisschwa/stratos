@@ -1,0 +1,39 @@
+package billingresource
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/menlocloud/stratos/internal/cloud"
+	"github.com/menlocloud/stratos/internal/platform/pricing"
+)
+
+// FloatingIPProvider maps a FLOATING_IP →
+// a "floating_ip" BillingResource (typically a flat per-IP charge).
+type FloatingIPProvider struct{}
+
+func NewFloatingIPProvider() *FloatingIPProvider { return &FloatingIPProvider{} }
+
+func (p *FloatingIPProvider) Type() string { return cloud.TypeFloatingIP }
+
+func (p *FloatingIPProvider) GetBillingInformation(_ context.Context, _ pricing.BillingContext, cr *cloud.CloudResource) ([]*pricing.BillingResource, error) {
+	values := map[string]any{"display_name": fmt.Sprintf("floating-ip-%s", cr.ExternalID)}
+	if fip, ok := mapAt(cr.Data, "floatingIp"); ok {
+		values["status"] = fip["status"]
+		values["floating_network_id"] = fip["floating_network_id"]
+	}
+	return []*pricing.BillingResource{{
+		ResourceID:          cr.ID,
+		ProjectID:           cr.ProjectID,
+		ResourceType:        "floating_ip",
+		Values:              values,
+		BillingResourceType: floatingIPType(),
+	}}, nil
+}
+
+func floatingIPType() *pricing.BillingResourceType {
+	s := func(n string) pricing.ResourceAttribute { return pricing.ResourceAttribute{Name: n, Type: "string"} }
+	return &pricing.BillingResourceType{ResourceType: "floating_ip", Attributes: []pricing.ResourceAttribute{
+		s("status"), s("floating_network_id"), s("display_name"),
+	}}
+}

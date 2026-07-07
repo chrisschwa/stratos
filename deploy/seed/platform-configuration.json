@@ -1,0 +1,13 @@
+{
+  "name": "Stratos",
+  "language": "en",
+  "defaultConfiguration": true,
+  "branding": {
+    "name": "Stratos",
+    "logo": "https://stratos.example/logo.png",
+    "color": "#0066cc",
+    "faviconUrl": "https://stratos.example/favicon.ico"
+  },
+  "dateConfiguration": { "dateFormat": "DD/MM/YYYY" },
+  "regions": []
+}

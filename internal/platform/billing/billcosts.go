@@ -1,0 +1,201 @@
+package billing
+
+import (
+	"encoding/json"
+	"time"
+
+	"github.com/shopspring/decimal"
+
+	"github.com/menlocloud/stratos/internal/cloud"
+	"github.com/menlocloud/stratos/internal/platform/pricing"
+)
+
+// MonthlyBillCosts sums a profile's bill-item net amounts into the current-month and previous-month
+// buckets, keyed by each bill's billing-cycle start month (currentMonth/
+// lastMonth — the same per-month bill-net aggregation the client cost-info dashboard uses). The
+// forecast is left equal to current by the caller (the live prorated re-rate is deferred).
+func MonthlyBillCosts(bills []pricing.Bill, now time.Time) (current, last decimal.Decimal) {
+	current, last = decimal.Zero, decimal.Zero
+	curYear, curMonth, _ := now.Date()
+	lastT := now.AddDate(0, -1, 0)
+	lastYear, lastMonth, _ := lastT.Date()
+	for i := range bills {
+		b := &bills[i]
+		cycleStart := now
+		if b.BillingCycle != nil && b.BillingCycle.StartDate != nil {
+			cycleStart = b.BillingCycle.StartDate.UTC()
+		}
+		y, m, _ := cycleStart.Date()
+		for j := range b.Items {
+			switch {
+			case y == curYear && m == curMonth:
+				current = current.Add(b.Items[j].NetAmount)
+			case y == lastYear && m == lastMonth:
+				last = last.Add(b.Items[j].NetAmount)
+			}
+		}
+	}
+	return current, last
+}
+
+// CreatedAtLookup returns a cloud resource's creation time by id (nil when unknown). Used to stamp
+// the topResourcePrices CREATED column; pass nil to omit it.
+type CreatedAtLookup func(resourceID string) *time.Time
+
+// BillCostBreakdown aggregates a profile's bills into the dashboard cost overview shared by the
+// client project dashboard and the admin billing-profile detail (the usage-overview
+// cost fields): the current/previous-month net, the
+// cost-by-category maps (currentMonthCostsByType / lastMonthCostsByType — the admin costs-comparison
+// chart reads both), and the per-item topResourcePrices list (each entry mirrors a CloudResource so
+// the FE name/created helpers resolve). Forecast is left equal to current by the caller (prorate
+// deferred).
+func BillCostBreakdown(bills []pricing.Bill, now time.Time, createdAt CreatedAtLookup) (current, last decimal.Decimal, byType, lastByType map[string]any, top []any) {
+	current, last = decimal.Zero, decimal.Zero
+	byCat := map[string]decimal.Decimal{}
+	lastByCat := map[string]decimal.Decimal{}
+	top = []any{}
+	curYear, curMonth, _ := now.Date()
+	lastMonthTime := now.AddDate(0, -1, 0)
+	lastYear, lastMonth, _ := lastMonthTime.Date()
+	for i := range bills {
+		b := &bills[i]
+		cycleStart := now
+		if b.BillingCycle != nil && b.BillingCycle.StartDate != nil {
+			cycleStart = b.BillingCycle.StartDate.UTC()
+		}
+		y, m, _ := cycleStart.Date()
+		switch {
+		case y == curYear && m == curMonth:
+			for j := range b.Items {
+				it := &b.Items[j]
+				current = current.Add(it.NetAmount)
+				cat := resourceBillingCategory(it.ResourceType)
+				byCat[cat] = byCat[cat].Add(it.NetAmount)
+				cloudType, dataKey := billingResourceCloudShape(it.ResourceType)
+				// resource mirrors a CloudResource (the FE name helper reads data.<key>.name; the
+				// created helper reads resource.createdAt → the CREATED column).
+				res := map[string]any{
+					"id": it.ResourceID, "type": cloudType, "name": it.Name,
+					"data": map[string]any{dataKey: map[string]any{"id": it.ResourceID, "name": it.Name}},
+				}
+				if createdAt != nil {
+					if ts := createdAt(it.ResourceID); ts != nil {
+						res["createdAt"] = ts.UTC().Format(time.RFC3339)
+					}
+				}
+				top = append(top, map[string]any{
+					"resource":       res,
+					"currentCost":    json.Number(it.NetAmount.String()),
+					"forecastedCost": json.Number(it.NetAmount.String()),
+				})
+			}
+		case y == lastYear && m == lastMonth:
+			for j := range b.Items {
+				it := &b.Items[j]
+				last = last.Add(it.NetAmount)
+				cat := resourceBillingCategory(it.ResourceType)
+				lastByCat[cat] = lastByCat[cat].Add(it.NetAmount)
+			}
+		}
+	}
+	byType = decimalCatMap(byCat)
+	lastByType = decimalCatMap(lastByCat)
+	return current, last, byType, lastByType, top
+}
+
+// CostInfoMap renders a breakdown (current/last + by-type maps + topResourcePrices) into the CostInfo
+// envelope every field present (all fields non-null) shared by the profile-level and the
+// per-project cost info. Forecast = current (live prorate deferred).
+func CostInfoMap(cur, last decimal.Decimal, byType, lastByType map[string]any, top []any) map[string]any {
+	return map[string]any{
+		"lastMonthCosts":                json.Number(last.String()),
+		"currentMonthCosts":             json.Number(cur.String()),
+		"currentMonthCostsByType":       byType,
+		"forecastedMonthEndCostsByType": byType,
+		"lastMonthCostsByType":          lastByType,
+		"forecastedMonthEndCosts":       json.Number(cur.String()),
+		"topResourcePrices":             top,
+	}
+}
+
+// ProjectCostInfoMap builds the per-project CostInfo (the admin profile-detail
+// per-project drill-down): group the profile's bill items by `projectId` and run the cost breakdown
+// over each project's items → {projectId: CostInfo}. Items carry projectId (SaveChargingToBill sets
+// BillItem.ProjectID); an item with no projectId is skipped. Never nil.
+func ProjectCostInfoMap(bills []pricing.Bill, now time.Time, createdAt CreatedAtLookup) map[string]any {
+	order := []string{}
+	seen := map[string]bool{}
+	for i := range bills {
+		for j := range bills[i].Items {
+			if p := bills[i].Items[j].ProjectID; p != "" && !seen[p] {
+				seen[p] = true
+				order = append(order, p)
+			}
+		}
+	}
+	out := map[string]any{}
+	for _, pid := range order {
+		sub := make([]pricing.Bill, 0, len(bills))
+		for i := range bills {
+			b := bills[i] // struct copy; reassigning b.Items below leaves the input slice untouched
+			items := make([]pricing.BillItem, 0, len(b.Items))
+			for j := range b.Items {
+				if b.Items[j].ProjectID == pid {
+					items = append(items, b.Items[j])
+				}
+			}
+			if len(items) == 0 {
+				continue
+			}
+			b.Items = items
+			sub = append(sub, b)
+		}
+		c, l, bt, lbt, tp := BillCostBreakdown(sub, now, createdAt)
+		out[pid] = CostInfoMap(c, l, bt, lbt, tp)
+	}
+	return out
+}
+
+// decimalCatMap renders a category→decimal map as category→json.Number (money as a JSON number).
+func decimalCatMap(in map[string]decimal.Decimal) map[string]any {
+	out := map[string]any{}
+	for cat, amt := range in {
+		out[cat] = json.Number(amt.String())
+	}
+	return out
+}
+
+// billingResourceCloudShape maps a billing-resource type (instance/volume/…) to the CloudResource
+// {type, data-key} the FE's resource-name helper reads (data.<key>.name). Keeps the type as-is when
+// unmapped.
+func billingResourceCloudShape(billingType string) (cloudType, dataKey string) {
+	switch billingType {
+	case "instance", "instance_traffic":
+		return cloud.TypeServer, "server"
+	case "volume":
+		return cloud.TypeVolume, "volume"
+	case "floating_ip":
+		return cloud.TypeFloatingIP, "floatingIp"
+	case "load_balancer":
+		return cloud.TypeLoadBalancer, "loadBalancer"
+	case "bucket":
+		return cloud.TypeBucket, "bucket"
+	default:
+		return billingType, billingType
+	}
+}
+
+// resourceBillingCategory maps a resourceType → the
+// dashboard cost category. Default Compute (the fallback).
+func resourceBillingCategory(resourceType string) string {
+	switch resourceType {
+	case "network", "port", "floating_ip", "router", "subnet", "security_group", "load_balancer":
+		return "Networking"
+	case "volume", "volume_snapshot", "volume_backup":
+		return "Block Storage"
+	case "bucket", "object_store":
+		return "Object Storage"
+	default:
+		return "Compute"
+	}
+}
