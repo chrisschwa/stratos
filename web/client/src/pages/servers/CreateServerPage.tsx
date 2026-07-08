@@ -24,6 +24,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { apiFetch, type CloudScope } from "@/lib/api"
 import { useLocations, useProject, useProjectId, usePublicNetworks } from "@/lib/hooks"
 import type { CloudResource, Location } from "@/lib/types"
+import { isPrivateNetwork } from "../network/NetworksPage"
 
 type Az = { name?: string; displayName?: string; available?: boolean }
 type GlanceImage = Record<string, any>
@@ -88,6 +89,8 @@ export default function CreateServerPage() {
   const pubNets = usePublicNetworks(pid, scope)
   // publicNetworksVisible=false → hide the pool picker; the server auto-assigns the floating IP.
   const netsVisible = useProject(pid).project?.publicNetworksVisible === true
+  // and offer only own private networks to attach to (no shared/external infra) when hidden.
+  const networkRows = netsVisible ? (networks.data ?? []) : (networks.data ?? []).filter(isPrivateNetwork)
 
   const [azName, setAzName] = useState<string>()
   const [imageId, setImageId] = useState<string>()
@@ -295,13 +298,13 @@ export default function CreateServerPage() {
           <Step n={5} title="Network">
             {networks.isLoading ? (
               <Skeleton className="h-16" />
-            ) : !networks.data?.length ? (
+            ) : !networkRows.length ? (
               <p className="text-sm text-muted-foreground">
                 No networks in this project — create one under Networking first.
               </p>
             ) : (
               <div className="grid gap-2">
-                {networks.data.map((n) => {
+                {networkRows.map((n) => {
                   const ext = n.externalId ?? ""
                   const checked = netIds.includes(ext)
                   return (

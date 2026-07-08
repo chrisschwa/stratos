@@ -19,7 +19,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { apiFetch } from "@/lib/api"
 import { timeAgo } from "@/lib/format"
-import { useCloudList, useCloudScope, useProjectId } from "@/lib/hooks"
+import { useCloudList, useCloudScope, useProject, useProjectId } from "@/lib/hooks"
 import type { CloudResource } from "@/lib/types"
 
 export function networkName(r: CloudResource): string {
@@ -28,12 +28,22 @@ export function networkName(r: CloudResource): string {
 export function networkStatus(r: CloudResource): string | undefined {
   return (r.data?.network?.status as string) ?? r.status
 }
+// A private (own) network — not a shared or router:external cloud network. When the external-network
+// picker is hidden (publicNetworksVisible=false), the Networks page + create-server network step show
+// only these; external/shared pools stay in the FIP/router pickers.
+export function isPrivateNetwork(r: CloudResource): boolean {
+  const net = (r.data?.network ?? {}) as Record<string, unknown>
+  return !net.shared && !net["router:external"]
+}
 
 export default function NetworksPage() {
   const pid = useProjectId()
   const scope = useCloudScope(pid)
   const qc = useQueryClient()
   const { data, isLoading, refetch, isFetching, error } = useCloudList(pid, "NETWORK")
+  // Hidden external picker → show only the project's own private networks (drop shared/external infra).
+  const netsVisible = useProject(pid).project?.publicNetworksVisible === true
+  const rows = netsVisible ? (data ?? []) : (data ?? []).filter(isPrivateNetwork)
   const [createOpen, setCreateOpen] = useState(false)
   const [toDelete, setToDelete] = useState<CloudResource | null>(null)
 
@@ -97,7 +107,7 @@ export default function NetworksPage() {
         <Skeleton className="h-64" />
       ) : error ? (
         <div className="rounded-lg border bg-muted/40 p-6 text-sm text-muted-foreground">{(error as Error).message}</div>
-      ) : !data?.length ? (
+      ) : !rows.length ? (
         <EmptyState
           icon={Network}
           title="No networks yet"
@@ -122,7 +132,7 @@ export default function NetworksPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.map((r) => {
+              {rows.map((r) => {
                 const net = (r.data?.network ?? {}) as Record<string, unknown>
                 const subnets = (net.subnets as string[] | undefined) ?? []
                 return (

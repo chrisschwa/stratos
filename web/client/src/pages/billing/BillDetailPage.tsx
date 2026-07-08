@@ -10,11 +10,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog"
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { apiFetch } from "@/lib/api"
 import { fmtDate, fmtDateTime, fmtMoney } from "@/lib/format"
-import { useBillingSummary, useProjectId } from "@/lib/hooks"
+import { useBillingSummary, useProjectId, useProjects } from "@/lib/hooks"
 import type { Bill, Transaction } from "@/lib/types"
 import { downloadPdf } from "./HistoryPage"
 
@@ -25,6 +28,11 @@ export default function BillDetailPage() {
   const { data: summary } = useBillingSummary(pid)
   const bp = summary?.id
   const [payOpen, setPayOpen] = useState(false)
+  // The bill is org (billing-profile) scoped — all projects' line items. Resolve + filter by project
+  // so an org admin can read per-project spend on the same bill.
+  const { data: projects } = useProjects()
+  const [projFilter, setProjFilter] = useState("__all__")
+  const projName = (id?: string) => projects?.find((p) => p.id === id)?.name || id || "—"
 
   const { data: bill, isLoading, error } = useQuery({
     queryKey: ["bill", bp, billId],
@@ -77,6 +85,10 @@ export default function BillDetailPage() {
   const promoCredits = (bill.appliedPromotionalCredits as Array<Record<string, any>> | undefined) ?? []
   const accountCredits = (bill.appliedAccountCredits as Array<Record<string, any>> | undefined) ?? []
   const appliedCredits = [...promoCredits, ...accountCredits]
+
+  const allItems = bill.items ?? []
+  const projectIds = [...new Set(allItems.map((it) => it.projectId as string).filter(Boolean))]
+  const items = projFilter === "__all__" ? allItems : allItems.filter((it) => (it.projectId as string) === projFilter)
 
   return (
     <>
@@ -131,20 +143,41 @@ export default function BillDetailPage() {
         <Total label="Unpaid" value={fmtMoney(bill.unpaidGrossAmount, ccy)} />
       </div>
 
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h2 className="text-sm font-medium text-muted-foreground">Line items</h2>
+        {projectIds.length > 1 ? (
+          <Select value={projFilter} onValueChange={setProjFilter}>
+            <SelectTrigger className="w-56">
+              <SelectValue placeholder="All projects" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">All projects</SelectItem>
+              {projectIds.map((id) => (
+                <SelectItem key={id} value={id}>
+                  {projName(id)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : null}
+      </div>
+
       <Card className="overflow-hidden py-0">
         <Table>
           <TableHeader>
             <TableRow>
               <TableHead>Item</TableHead>
+              <TableHead>Project</TableHead>
               <TableHead>Resource type</TableHead>
               <TableHead className="text-right">Net</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {bill.items?.length ? (
-              bill.items.map((it, i) => (
+            {items.length ? (
+              items.map((it, i) => (
                 <TableRow key={i}>
                   <TableCell className="font-medium">{(it.name as string) ?? (it.resourceId as string) ?? "—"}</TableCell>
+                  <TableCell className="text-sm text-muted-foreground">{projName(it.projectId as string)}</TableCell>
                   <TableCell className="text-sm text-muted-foreground">{(it.resourceType as string) ?? "—"}</TableCell>
                   <TableCell className="text-right font-mono tabular-nums">
                     {fmtMoney(it.netAmount as number, (it.currency as string) ?? ccy)}
@@ -153,7 +186,7 @@ export default function BillDetailPage() {
               ))
             ) : (
               <TableRow>
-                <TableCell colSpan={3} className="py-6 text-center text-sm text-muted-foreground">
+                <TableCell colSpan={4} className="py-6 text-center text-sm text-muted-foreground">
                   No items on this bill.
                 </TableCell>
               </TableRow>

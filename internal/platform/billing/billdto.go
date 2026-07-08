@@ -21,8 +21,10 @@ type BillItemDto struct {
 	Name         string      `json:"name,omitempty"`
 	ResourceID   string      `json:"resourceId,omitempty"`
 	ResourceType string      `json:"resourceType,omitempty"`
-	Currency     string      `json:"currency,omitempty"`
-	NetAmount    json.Number `json:"netAmount"`
+	// ProjectID lets the (org-scoped) bill be grouped/filtered per project on the client.
+	ProjectID string      `json:"projectId,omitempty"`
+	Currency  string      `json:"currency,omitempty"`
+	NetAmount json.Number `json:"netAmount"`
 }
 
 type BillDto struct {
@@ -79,6 +81,7 @@ func ToBillDto(profile *BillingProfile, bill *pricing.Bill, rates []pricing.TaxR
 			Name:         it.Name,
 			ResourceID:   it.ResourceID,
 			ResourceType: it.ResourceType,
+			ProjectID:    it.ProjectID,
 			Currency:     it.Currency,
 			NetAmount:    num(it.NetAmount),
 		})
