@@ -73,6 +73,8 @@ export type CostInfo = {
   accountCredit?: number
   promotionalCredits?: number
   topResourcePrices?: Array<{
+    // Backend emits currentCost; price is a legacy alias some callers still read.
+    currentCost?: number
     price?: number
     resource?: { id?: string; type?: string; name?: string; createdAt?: string; data?: Record<string, any> }
   }>

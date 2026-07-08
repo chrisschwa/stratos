@@ -130,7 +130,7 @@ export function DashboardPage() {
                         <StatusBadge status={r.resource?.type} />
                       </TableCell>
                       <TableCell className="text-muted-foreground">{timeAgo(r.resource?.createdAt)}</TableCell>
-                      <TableCell className="text-right font-mono tabular-nums">{fmtMoney(r.price, currency)}</TableCell>
+                      <TableCell className="text-right font-mono tabular-nums">{fmtMoney(r.currentCost ?? r.price, currency)}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>

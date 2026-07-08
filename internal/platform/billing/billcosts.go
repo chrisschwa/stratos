@@ -2,6 +2,8 @@ package billing
 
 import (
 	"encoding/json"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -53,7 +55,11 @@ func BillCostBreakdown(bills []pricing.Bill, now time.Time, createdAt CreatedAtL
 	current, last = decimal.Zero, decimal.Zero
 	byCat := map[string]decimal.Decimal{}
 	lastByCat := map[string]decimal.Decimal{}
-	top = []any{}
+	// topResourcePrices is aggregated per underlying resource, not per bill item: a server's
+	// instance_traffic cost merges into the server itself (keyed by the stripped id) so it isn't a
+	// duplicate row, and the list is sorted by total cost so "top" actually means top spenders.
+	agg := map[string]*topEntry{}
+	order := []string{}
 	curYear, curMonth, _ := now.Date()
 	lastMonthTime := now.AddDate(0, -1, 0)
 	lastYear, lastMonth, _ := lastMonthTime.Date()
@@ -71,23 +77,20 @@ func BillCostBreakdown(bills []pricing.Bill, now time.Time, createdAt CreatedAtL
 				current = current.Add(it.NetAmount)
 				cat := resourceBillingCategory(it.ResourceType)
 				byCat[cat] = byCat[cat].Add(it.NetAmount)
-				cloudType, dataKey := billingResourceCloudShape(it.ResourceType)
-				// resource mirrors a CloudResource (the FE name helper reads data.<key>.name; the
-				// created helper reads resource.createdAt → the CREATED column).
-				res := map[string]any{
-					"id": it.ResourceID, "type": cloudType, "name": it.Name,
-					"data": map[string]any{dataKey: map[string]any{"id": it.ResourceID, "name": it.Name}},
+				id := canonicalResourceID(it.ResourceType, it.ResourceID)
+				e := agg[id]
+				if e == nil {
+					e = &topEntry{id: id}
+					agg[id] = e
+					order = append(order, id)
 				}
-				if createdAt != nil {
-					if ts := createdAt(it.ResourceID); ts != nil {
-						res["createdAt"] = ts.UTC().Format(time.RFC3339)
-					}
+				e.cost = e.cost.Add(it.NetAmount)
+				// Prefer the primary resource's metadata (the instance) over its traffic line, but
+				// either maps to the server so a traffic-only group still names correctly.
+				if it.ResourceType != "instance_traffic" || e.name == "" {
+					e.cloudType, e.dataKey = billingResourceCloudShape(it.ResourceType)
+					e.name = it.Name
 				}
-				top = append(top, map[string]any{
-					"resource":       res,
-					"currentCost":    json.Number(it.NetAmount.String()),
-					"forecastedCost": json.Number(it.NetAmount.String()),
-				})
 			}
 		case y == lastYear && m == lastMonth:
 			for j := range b.Items {
@@ -98,9 +101,51 @@ func BillCostBreakdown(bills []pricing.Bill, now time.Time, createdAt CreatedAtL
 			}
 		}
 	}
+	// Sort by total cost desc (stable → equal-cost items keep first-seen order).
+	sort.SliceStable(order, func(i, j int) bool { return agg[order[i]].cost.GreaterThan(agg[order[j]].cost) })
+	top = make([]any, 0, len(order))
+	for _, id := range order {
+		e := agg[id]
+		// resource mirrors a CloudResource (the FE name helper reads data.<key>.name; the created
+		// helper reads resource.createdAt → the CREATED column).
+		res := map[string]any{
+			"id": e.id, "type": e.cloudType, "name": e.name,
+			"data": map[string]any{e.dataKey: map[string]any{"id": e.id, "name": e.name}},
+		}
+		if createdAt != nil {
+			if ts := createdAt(e.id); ts != nil {
+				res["createdAt"] = ts.UTC().Format(time.RFC3339)
+			}
+		}
+		top = append(top, map[string]any{
+			"resource":       res,
+			"currentCost":    json.Number(e.cost.String()),
+			"forecastedCost": json.Number(e.cost.String()),
+		})
+	}
 	byType = decimalCatMap(byCat)
 	lastByType = decimalCatMap(lastByCat)
 	return current, last, byType, lastByType, top
+}
+
+// topEntry accumulates one resource's total cost across its bill items (e.g. an instance plus its
+// instance_traffic) for the topResourcePrices list.
+type topEntry struct {
+	cost      decimal.Decimal
+	id        string
+	name      string
+	cloudType string
+	dataKey   string
+}
+
+// canonicalResourceID collapses a bill item's resource id to the underlying resource: an
+// instance_traffic line (id "instance_traffic-<serverId>") folds into its server so the two don't
+// show as separate rows. Everything else is its own id.
+func canonicalResourceID(resourceType, resourceID string) string {
+	if resourceType == "instance_traffic" {
+		return strings.TrimPrefix(resourceID, "instance_traffic-")
+	}
+	return resourceID
 }
 
 // CostInfoMap renders a breakdown (current/last + by-type maps + topResourcePrices) into the CostInfo
