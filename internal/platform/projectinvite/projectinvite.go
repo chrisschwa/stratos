@@ -43,6 +43,16 @@ func (r *Repo) ByEmailAndToken(ctx context.Context, email, token string) (pgdoc.
 	return doc, nil
 }
 
+// ByEmail lists the pending (non-expired) invites for an email.
+func (r *Repo) ByEmail(ctx context.Context, email string) ([]pgdoc.M, error) {
+	r.purgeExpired(ctx)
+	var docs []pgdoc.M
+	if err := r.invites.Find(ctx, pgdoc.M{"email": email}, &docs); err != nil {
+		return nil, err
+	}
+	return docs, nil
+}
+
 // DeleteByEmailAndProjectID removes all invites for an email+project (accept-invite cleanup).
 func (r *Repo) DeleteByEmailAndProjectID(ctx context.Context, email, projectID string) error {
 	_, err := r.invites.DeleteMany(ctx, pgdoc.M{"email": email, "projectId": projectID})
@@ -137,6 +147,7 @@ func (h *Handler) auditInvite(u *user.User, action, inviteID, projectID, project
 
 func (h *Handler) Routes(r chi.Router) {
 	r.Post("/project-invites/invite", h.invite)
+	r.Get("/project-invites/mine", h.mine) // static — precedes /{token}
 	r.Get("/project-invites/{token}", h.get)
 	r.Post("/project-invites/accept/{token}", h.accept)
 	r.Post("/project-invites/decline/{token}", h.decline)
@@ -308,4 +319,36 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.OK(w, inv) // deferred: resolve + return the invited Project
+}
+
+// mine lists the caller's pending project invites (by their verified email), each with the
+// target project name + token. It lets a user who logged in directly — without clicking the
+// emailed join link — still discover and accept their invitations (so they land in the org +
+// project instead of an empty onboarding). No token needed: the email comes from the session.
+func (h *Handler) mine(w http.ResponseWriter, r *http.Request) {
+	u, err := h.users.Require(r.Context(), httpx.RC(r.Context()).Sub)
+	if err != nil {
+		if !httpx.WriteError(w, err) {
+			httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	invs, err := h.repo.ByEmail(r.Context(), u.Email)
+	if err != nil {
+		httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]map[string]any, 0, len(invs))
+	for _, inv := range invs {
+		projectID, _ := inv["projectId"].(string)
+		item := map[string]any{"token": inv["token"], "projectId": projectID}
+		if exp, ok := inv["expiresAt"]; ok {
+			item["expiresAt"] = exp
+		}
+		if p, _ := h.projectSvc.GetProjectByID(r.Context(), projectID); p != nil {
+			item["projectName"] = p.Name
+		}
+		out = append(out, item)
+	}
+	httpx.List(w, out)
 }
