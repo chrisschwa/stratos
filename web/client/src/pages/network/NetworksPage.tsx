@@ -51,21 +51,36 @@ export default function NetworksPage() {
   const [name, setName] = useState("")
   const [withSubnet, setWithSubnet] = useState(true)
   const [cidr, setCidr] = useState("10.0.0.0/24")
+  const [dns, setDns] = useState("8.8.8.8, 1.1.1.1")
+  const [gatewayIp, setGatewayIp] = useState("") // blank = auto (first usable); set to a VM IP for a self-hosted router
 
   const invalidate = () => void qc.invalidateQueries({ queryKey: ["cloud", pid, "NETWORK"] })
 
   const create = useMutation({
-    mutationFn: () =>
-      apiFetch(`/project/${pid}/cloud`, {
+    mutationFn: () => {
+      const dnsList = dns.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean)
+      const gw = gatewayIp.trim()
+      return apiFetch(`/project/${pid}/cloud`, {
         method: "POST",
         cloud: scope,
         body: {
           type: "NETWORK",
           data: withSubnet
-            ? { name, defaultSubnet: true, cidr, enableDhcp: true, gateway: true }
+            ? {
+                name,
+                defaultSubnet: true,
+                cidr,
+                enableDhcp: true,
+                // A custom gateway points the subnet at a self-hosted router VM (e.g. pfSense);
+                // blank uses neutron's auto gateway.
+                gateway: true,
+                ...(gw ? { customGatewayIp: true, gatewayIp: gw } : {}),
+                ...(dnsList.length ? { dnsNameServers: dnsList } : {}),
+              }
             : { name },
         },
-      }),
+      })
+    },
     onSuccess: () => {
       toast.success(`Network "${name}" created`)
       setCreateOpen(false)
@@ -184,10 +199,36 @@ export default function NetworksPage() {
               <Label htmlFor="net-subnet">Create a subnet</Label>
             </div>
             {withSubnet ? (
-              <div className="grid gap-2">
-                <Label htmlFor="net-cidr">Subnet CIDR</Label>
-                <Input id="net-cidr" className="font-mono" value={cidr} onChange={(e) => setCidr(e.target.value)} />
-              </div>
+              <>
+                <div className="grid gap-2">
+                  <Label htmlFor="net-cidr">Subnet CIDR</Label>
+                  <Input id="net-cidr" className="font-mono" value={cidr} onChange={(e) => setCidr(e.target.value)} />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="net-dns">DNS servers</Label>
+                  <Input
+                    id="net-dns"
+                    className="font-mono"
+                    value={dns}
+                    onChange={(e) => setDns(e.target.value)}
+                    placeholder="8.8.8.8, 1.1.1.1"
+                  />
+                  <p className="text-xs text-muted-foreground">Comma/space separated. Leave blank for none.</p>
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="net-gw">Gateway IP</Label>
+                  <Input
+                    id="net-gw"
+                    className="font-mono"
+                    value={gatewayIp}
+                    onChange={(e) => setGatewayIp(e.target.value)}
+                    placeholder="Auto (first usable)"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Set to a VM's IP to route this subnet through a self-hosted router (e.g. pfSense/OPNsense).
+                  </p>
+                </div>
+              </>
             ) : null}
           </div>
           <DialogFooter>

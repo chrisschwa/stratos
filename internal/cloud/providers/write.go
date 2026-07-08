@@ -285,7 +285,7 @@ func (s *WriteService) Create(ctx context.Context, serviceID, region, projectID,
 		}
 		srv, err := s.w.CreateServer(ctx, client.CreateServerOpts{
 			Name: mstr(d, "name"), FlavorID: mstr(d, "flavorId"), ImageID: mstr(d, "imageId"),
-			NetworkIDs: netIDs, KeyName: mstr(d, "keyName"),
+			NetworkIDs: netIDs, FixedIPs: ifaceFixedIPs(d["networkInterfaces"]), KeyName: mstr(d, "keyName"),
 			SecurityGroups: secGroups, AvailabilityZone: az,
 			AdminPass: mstr(d, "adminPass"), UserData: userData,
 		})
@@ -320,6 +320,7 @@ func (s *WriteService) Create(ctx context.Context, serviceID, region, projectID,
 			NetworkID: mstr(d, "networkId"), Name: mstr(d, "name"),
 			MACAddress: mstr(d, "macAddress"), FixedIP: mstr(d, "fixedIp"), SubnetID: mstr(d, "subnetId"),
 			PortSecurityEnabled: mboolPtr(d, "portSecurityEnabled"),
+			AllowedAddressPairs: addressPairs(d["allowedAddressPairs"]),
 		})
 		if err != nil {
 			return nil, err
@@ -899,6 +900,11 @@ func (s *WriteService) Action(ctx context.Context, serviceID, projectID, externa
 			} else if sgs != nil {
 				opts.SecurityGroups = sgs
 			}
+			// allowedAddressPairs: present (even empty) → set/replace; absent → leave unchanged.
+			if _, present := data["allowedAddressPairs"]; present {
+				pairs := addressPairs(data["allowedAddressPairs"])
+				opts.AllowedAddressPairs = &pairs
+			}
 			port, err := s.w.UpdatePort(ctx, externalID, opts)
 			if err != nil {
 				return nil, err
@@ -1273,6 +1279,54 @@ func ifaceUUIDs(v any) []string {
 				out = append(out, id)
 			}
 		}
+	}
+	return out
+}
+
+// ifaceFixedIPs maps networkInterfaces [{uuid, fixedIp}] → {networkID: fixedIP} for the entries that
+// request a specific IP (blank fixedIp entries are omitted).
+func ifaceFixedIPs(v any) map[string]string {
+	raw, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := map[string]string{}
+	for _, e := range raw {
+		m, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := m["uuid"].(string)
+		ip, _ := m["fixedIp"].(string)
+		if id != "" && ip != "" {
+			out[id] = ip
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// addressPairs parses allowedAddressPairs [{ipAddress, macAddress}] → []client.AddressPair (blank
+// IPs dropped).
+func addressPairs(v any) []client.AddressPair {
+	raw, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]client.AddressPair, 0, len(raw))
+	for _, e := range raw {
+		m, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		ip, _ := m["ipAddress"].(string)
+		if ip == "" {
+			continue
+		}
+		mac, _ := m["macAddress"].(string)
+		out = append(out, client.AddressPair{IPAddress: ip, MACAddress: mac})
 	}
 	return out
 }

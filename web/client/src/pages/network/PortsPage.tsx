@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
@@ -43,6 +44,9 @@ export default function PortsPage() {
   const [name, setName] = useState("")
   const [networkId, setNetworkId] = useState("")
   const [fixedIp, setFixedIp] = useState("")
+  // Allowed address pairs — extra IPs/CIDRs the port may source traffic as (keepalived/HAProxy VIP,
+  // or the range a self-hosted router VM forwards). One per line.
+  const [pairs, setPairs] = useState("")
 
   // Edit dialog (Go TypePort UPDATE reads exactly: name?, portSecurityEnabled?, securityGroups? —
   // adminStateUp is NOT read; securityGroups editing is omitted here, disabling port security
@@ -50,12 +54,19 @@ export default function PortsPage() {
   const [editTarget, setEditTarget] = useState<CloudResource | null>(null)
   const [editName, setEditName] = useState("")
   const [editPortSec, setEditPortSec] = useState(true)
+  const [editPairs, setEditPairs] = useState("")
 
   const invalidate = () => void qc.invalidateQueries({ queryKey: ["cloud", pid, "PORT"] })
+
+  // parsePairs turns a newline/comma list of IPs/CIDRs into the allowedAddressPairs wire shape.
+  const parsePairs = (s: string) =>
+    s.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean).map((ip) => ({ ipAddress: ip }))
 
   const openEdit = (r: CloudResource) => {
     setEditName((r.data?.port?.name as string) ?? "")
     setEditPortSec((r.data?.port?.port_security_enabled as boolean) !== false)
+    const aap = (r.data?.port?.allowed_address_pairs as Array<{ ip_address?: string }> | undefined) ?? []
+    setEditPairs(aap.map((p) => p.ip_address).filter(Boolean).join("\n"))
     setEditTarget(r)
   }
 
@@ -64,7 +75,10 @@ export default function PortsPage() {
       apiFetch(`/project/${pid}/cloud/${r.id}/action`, {
         method: "POST",
         cloud: scope,
-        body: { action: "UPDATE", data: { name: editName, portSecurityEnabled: editPortSec } },
+        body: {
+          action: "UPDATE",
+          data: { name: editName, portSecurityEnabled: editPortSec, allowedAddressPairs: parsePairs(editPairs) },
+        },
       }),
     onSuccess: () => {
       toast.success("Port updated")
@@ -78,6 +92,8 @@ export default function PortsPage() {
     mutationFn: () => {
       const data: Record<string, unknown> = { name, networkId }
       if (fixedIp) data.fixedIp = fixedIp
+      const aap = parsePairs(pairs)
+      if (aap.length) data.allowedAddressPairs = aap
       return apiFetch(`/project/${pid}/cloud`, {
         method: "POST",
         cloud: scope,
@@ -89,6 +105,7 @@ export default function PortsPage() {
       setCreateOpen(false)
       setName("")
       setFixedIp("")
+      setPairs("")
       invalidate()
     },
     onError: (e: Error) => toast.error(e.message),
@@ -222,6 +239,21 @@ export default function PortsPage() {
                 placeholder="10.0.0.10"
               />
             </div>
+            <div className="grid gap-2">
+              <Label htmlFor="port-aap">Allowed address pairs (optional)</Label>
+              <Textarea
+                id="port-aap"
+                className="font-mono text-xs"
+                rows={3}
+                value={pairs}
+                onChange={(e) => setPairs(e.target.value)}
+                placeholder={"10.0.0.100\n10.0.0.0/24"}
+              />
+              <p className="text-xs text-muted-foreground">
+                Extra IPs/CIDRs this port may use — e.g. a keepalived/HAProxy VIP, or the range a router VM
+                forwards. One per line.
+              </p>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)}>
@@ -238,7 +270,7 @@ export default function PortsPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Edit port</DialogTitle>
-            <DialogDescription>Update the port's name and port security.</DialogDescription>
+            <DialogDescription>Update the port's name, security and allowed address pairs.</DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 py-2">
             <div className="grid gap-2">
@@ -253,6 +285,21 @@ export default function PortsPage() {
                 </p>
               </div>
               <Switch id="edit-port-sec" checked={editPortSec} onCheckedChange={setEditPortSec} />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="edit-port-aap">Allowed address pairs</Label>
+              <Textarea
+                id="edit-port-aap"
+                className="font-mono text-xs"
+                rows={3}
+                value={editPairs}
+                onChange={(e) => setEditPairs(e.target.value)}
+                placeholder={"10.0.0.100\n10.0.0.0/24"}
+              />
+              <p className="text-xs text-muted-foreground">
+                Extra IPs/CIDRs this port may use (keepalived/HAProxy VIP, router-VM range). One per line; empty
+                clears them.
+              </p>
             </div>
           </div>
           <DialogFooter>

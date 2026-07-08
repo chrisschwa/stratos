@@ -275,6 +275,7 @@ type CreateServerOpts struct {
 	FlavorID         string
 	ImageID          string
 	NetworkIDs       []string
+	FixedIPs         map[string]string // networkID → requested fixed IP on that network (optional)
 	KeyName          string
 	SecurityGroups   []string
 	UserData         []byte
@@ -291,7 +292,7 @@ func (c *Client) CreateServer(ctx context.Context, o CreateServerOpts) (map[stri
 	}
 	nets := make([]servers.Network, 0, len(o.NetworkIDs))
 	for _, id := range o.NetworkIDs {
-		nets = append(nets, servers.Network{UUID: id})
+		nets = append(nets, servers.Network{UUID: id, FixedIP: o.FixedIPs[id]})
 	}
 	opts := servers.CreateOpts{
 		Name:             o.Name,
@@ -536,6 +537,25 @@ func (c *Client) SetServerMetadata(ctx context.Context, id string, meta map[stri
 }
 
 // CreatePortOpts mirrors CreatePortRequest essentials.
+// AddressPair is a port allowed-address-pair (an extra IP/MAC the port may source traffic as — e.g.
+// a keepalived/HAProxy VIP, or the CIDR a routing VM forwards for). MACAddress is optional.
+type AddressPair struct {
+	IPAddress  string
+	MACAddress string
+}
+
+// toPortPairs maps the local AddressPair slice to gophercloud's (dropping blank IPs).
+func toPortPairs(in []AddressPair) []ports.AddressPair {
+	out := make([]ports.AddressPair, 0, len(in))
+	for _, p := range in {
+		if p.IPAddress == "" {
+			continue
+		}
+		out = append(out, ports.AddressPair{IPAddress: p.IPAddress, MACAddress: p.MACAddress})
+	}
+	return out
+}
+
 type CreatePortOpts struct {
 	NetworkID           string
 	Name                string
@@ -543,6 +563,7 @@ type CreatePortOpts struct {
 	FixedIP             string // request fixedIp — paired with SubnetID
 	SubnetID            string // request subnetId → fixedIp(fixedIp, subnetId)
 	PortSecurityEnabled *bool  // nil → omit; false/true → portsecurity ext
+	AllowedAddressPairs []AddressPair
 }
 
 // CreatePort creates a Neutron port: networkId/name/adminState plus the
@@ -560,6 +581,9 @@ func (c *Client) CreatePort(ctx context.Context, o CreatePortOpts) (map[string]a
 	base := ports.CreateOpts{NetworkID: o.NetworkID, Name: o.Name, AdminStateUp: &asu, MACAddress: o.MACAddress}
 	if o.SubnetID != "" {
 		base.FixedIPs = []ports.IP{{SubnetID: o.SubnetID, IPAddress: o.FixedIP}}
+	}
+	if len(o.AllowedAddressPairs) > 0 {
+		base.AllowedAddressPairs = toPortPairs(o.AllowedAddressPairs)
 	}
 	var opts ports.CreateOptsBuilder = base
 	if o.PortSecurityEnabled != nil {
@@ -586,6 +610,7 @@ type UpdatePortOpts struct {
 	Name                *string
 	SecurityGroups      *[]string
 	PortSecurityEnabled *bool
+	AllowedAddressPairs *[]AddressPair // nil → omit; empty slice → clear all pairs
 }
 
 // UpdatePort updates a neutron port. Sets
@@ -597,6 +622,10 @@ func (c *Client) UpdatePort(ctx context.Context, portID string, o UpdatePortOpts
 		return nil, err
 	}
 	base := ports.UpdateOpts{Name: o.Name, SecurityGroups: o.SecurityGroups}
+	if o.AllowedAddressPairs != nil {
+		pairs := toPortPairs(*o.AllowedAddressPairs)
+		base.AllowedAddressPairs = &pairs
+	}
 	var opts ports.UpdateOptsBuilder = base
 	if o.PortSecurityEnabled != nil {
 		opts = portsecurity.PortUpdateOptsExt{UpdateOptsBuilder: base, PortSecurityEnabled: o.PortSecurityEnabled}

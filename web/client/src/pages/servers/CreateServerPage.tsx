@@ -1,6 +1,6 @@
 // Create-server wizard: Location → Availability zone → Image → Flavor → Network → Public IP → Access → Name.
 // API contract verified against internal/cloud/providers/write.go (TypeServer branch):
-// data reads name / imageId / flavorId / networkInterfaces:[{uuid}] / availabilityZoneName /
+// data reads name / imageId / flavorId / networkInterfaces:[{uuid, fixedIp?}] / availabilityZoneName /
 // keyName / adminPass / userData / securityGroupNames / assignFloatingIp / floatingNetworkId.
 // (No boot-volume keys in the Go create — not offered.)
 import { Fragment, useMemo, useState } from "react"
@@ -177,6 +177,7 @@ export default function CreateServerPage() {
   const [imageId, setImageId] = useState<string>()
   const [flavorId, setFlavorId] = useState<string>() // = flavor externalId
   const [netIds, setNetIds] = useState<string[]>([])
+  const [fixedIps, setFixedIps] = useState<Record<string, string>>({}) // networkExtId → requested fixed IP
   const [assignFip, setAssignFip] = useState(true)
   const [fipNetId, setFipNetId] = useState<string>()
   const [keyName, setKeyName] = useState("") // "" = no key pair
@@ -214,7 +215,9 @@ export default function CreateServerPage() {
             imageId,
             flavorId,
             ...(az ? { availabilityZoneName: az } : {}),
-            networkInterfaces: netIds.map((uuid) => ({ uuid })),
+            networkInterfaces: netIds.map((uuid) =>
+              fixedIps[uuid]?.trim() ? { uuid, fixedIp: fixedIps[uuid].trim() } : { uuid },
+            ),
             assignFloatingIp: wantFip,
             ...(wantFip && netsVisible && fipNet ? { floatingNetworkId: fipNet } : {}),
             ...(loginMethod === "key" && keyName ? { keyName } : {}),
@@ -412,17 +415,27 @@ export default function CreateServerPage() {
                   const ext = n.externalId ?? ""
                   const checked = netIds.includes(ext)
                   return (
-                    <label key={n.id} className="flex cursor-pointer items-center gap-3 text-sm">
-                      <Checkbox
-                        checked={checked}
-                        disabled={!ext}
-                        onCheckedChange={(v) =>
-                          setNetIds((ids) => (v === true ? [...ids, ext] : ids.filter((x) => x !== ext)))
-                        }
-                      />
-                      <span className="font-medium">{(n.data?.network?.name as string) ?? n.name ?? n.id}</span>
-                      <span className="font-mono text-xs text-muted-foreground">{ext}</span>
-                    </label>
+                    <div key={n.id} className="flex flex-wrap items-center gap-3 text-sm">
+                      <label className="flex cursor-pointer items-center gap-3">
+                        <Checkbox
+                          checked={checked}
+                          disabled={!ext}
+                          onCheckedChange={(v) =>
+                            setNetIds((ids) => (v === true ? [...ids, ext] : ids.filter((x) => x !== ext)))
+                          }
+                        />
+                        <span className="font-medium">{(n.data?.network?.name as string) ?? n.name ?? n.id}</span>
+                        <span className="font-mono text-xs text-muted-foreground">{ext}</span>
+                      </label>
+                      {checked ? (
+                        <Input
+                          className="h-8 w-44 font-mono text-xs"
+                          value={fixedIps[ext] ?? ""}
+                          onChange={(e) => setFixedIps((m) => ({ ...m, [ext]: e.target.value }))}
+                          placeholder="Fixed IP (optional)"
+                        />
+                      ) : null}
+                    </div>
                   )
                 })}
               </div>
