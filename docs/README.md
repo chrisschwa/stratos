@@ -31,6 +31,8 @@ selling, billing, and operating OpenStack cloud capacity (a Go backend, two Reac
   transactions, account credit, savings, promotions, activation/suspension.
 - [cloud-integration.md](cloud-integration.md) — the OpenStack facade: external
   services, the resource cache, sync, metrics, and notifications.
+- [openstack-notifications.md](openstack-notifications.md) — operator guide:
+  wiring OpenStack/RabbitMQ events into the near-real-time notification webhook.
 - [jobs-scheduling.md](jobs-scheduling.md) — scheduled jobs, the PostgreSQL
   distributed lock, and the optional RabbitMQ charge fan-out.
 
