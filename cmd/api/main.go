@@ -310,6 +310,7 @@ func run() error {
 		return notification.FetchByType(ctx, cc, resType, extID)
 	})
 	notiSvc := notification.NewService(cloudRepo, notiFetcher, notiResolver, nil)
+	notiSvc.SetLogger(log) // trace why an event is skipped/applied (a live update not landing)
 	notiH := notification.NewHandler(notiSvc, log)
 	// Per-provider webhook auth: the shared secret lives on each cloud's externalService
 	// (secret.notificationSecret), so ceilometer's Notifier URI carries a secret scoped to that

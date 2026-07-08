@@ -11,6 +11,7 @@ package notification
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -52,6 +53,17 @@ type Service struct {
 	fetch    ResourceFetcher
 	projects ProjectResolver
 	bareMeta BareMetalChecker
+	log      *slog.Logger // optional; diagnoses why an event was skipped/applied (nil = quiet)
+}
+
+// SetLogger wires an optional logger so skipped/applied notifications are traceable (why a live
+// dashboard update didn't land). Nil keeps it quiet.
+func (s *Service) SetLogger(l *slog.Logger) { s.log = l }
+
+func (s *Service) debug(msg string, args ...any) {
+	if s.log != nil {
+		s.log.Info("os-notification "+msg, args...)
+	}
 }
 
 func NewService(repo *cloud.Repo, fetch ResourceFetcher, projects ProjectResolver, bareMeta BareMetalChecker) *Service {
@@ -152,10 +164,12 @@ func minimalInfo(typ string, payload map[string]any) minimal {
 func (s *Service) Handle(ctx context.Context, serviceID, region string, msg OsloMessage) error {
 	typ, ok := TypeForEvent(msg, s.bareMeta)
 	if !ok {
+		s.debug("skip: unmapped event_type", "eventType", msg.EventType)
 		return nil // unmapped event_type → skip
 	}
 	info := minimalInfo(typ, msg.Payload)
 	if info.externalResourceID == "" {
+		s.debug("skip: no resource id in payload", "eventType", msg.EventType, "type", typ)
 		return nil // prepareMinimalInfo: blank resource id → skip
 	}
 
@@ -175,8 +189,12 @@ func (s *Service) Handle(ctx context.Context, serviceID, region string, msg Oslo
 		}
 	}
 	if projectID == "" {
+		s.debug("skip: unresolvable project", "eventType", msg.EventType, "type", typ,
+			"extProjectId", info.externalProjectID, "resourceId", info.externalResourceID)
 		return nil // unresolvable project → skip
 	}
+	s.debug("applying", "eventType", msg.EventType, "type", typ, "resourceId", info.externalResourceID,
+		"projectId", projectID, "delete", strings.Contains(msg.EventType, "delete"))
 
 	// processOsNotification: a delete event, or a live object that no longer exists, → DELETE;
 	// otherwise re-fetch the object and CREATE_UPDATE the cache with it.

@@ -62,6 +62,7 @@ type Writer interface {
 	AddRouterInterface(ctx context.Context, routerID, subnetID string) error
 	DeleteRouter(ctx context.Context, id string) error
 	CreateServer(ctx context.Context, o client.CreateServerOpts) (map[string]any, error)
+	GetServer(ctx context.Context, id string) (map[string]any, error)
 	DeleteServer(ctx context.Context, id string) error
 	CreateVolume(ctx context.Context, o client.CreateVolumeOpts) (map[string]any, error)
 	DeleteVolume(ctx context.Context, id string) error
@@ -321,6 +322,12 @@ func (s *WriteService) Create(ctx context.Context, serviceID, region, projectID,
 		srvID := mstr(srv, "id")
 		if srvID == "" {
 			return nil, fmt.Errorf("create server: no id")
+		}
+		// Nova's create response is minimal (id + adminPass only — no name/status/flavor), which would
+		// cache a blank, grey row until the next sync. Re-read the full server so the list shows the
+		// name + BUILD status + flavor immediately.
+		if full, gerr := s.w.GetServer(ctx, srvID); gerr == nil && mstr(full, "id") != "" {
+			srv = full
 		}
 		cr.ExternalID = srvID
 		cr.Data = map[string]any{"server": srv}
