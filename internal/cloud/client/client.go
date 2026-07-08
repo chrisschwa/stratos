@@ -129,12 +129,17 @@ func (c *Client) Do(ctx context.Context, method, url string, body, out any, okCo
 
 // Flavor is the facade view of a Nova flavor (read-only fields the platform needs).
 type Flavor struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	VCPUs int    `json:"vcpus"`
-	RAM   int    `json:"ram"`
-	Disk  int    `json:"disk"`
+	ID         string            `json:"id"`
+	Name       string            `json:"name"`
+	VCPUs      int               `json:"vcpus"`
+	RAM        int               `json:"ram"`
+	Disk       int               `json:"disk"`
+	ExtraSpecs map[string]string `json:"extra_specs"`
 }
+
+// flavorMicroversion: nova ≥ 2.61 embeds extra_specs in flavor list/get responses —
+// needed to see GPU passthrough aliases (pci_passthrough:alias) without per-flavor calls.
+const flavorMicroversion = "2.61"
 
 // ListFlavors returns the project's Nova flavors (read-only).
 func (c *Client) ListFlavors(ctx context.Context) ([]Flavor, error) {
@@ -142,6 +147,7 @@ func (c *Client) ListFlavors(ctx context.Context) ([]Flavor, error) {
 	if err != nil {
 		return nil, err
 	}
+	cc.Microversion = flavorMicroversion
 	pages, err := flavors.ListDetail(cc, flavors.ListOpts{}).AllPages(ctx)
 	if err != nil {
 		return nil, err
@@ -152,26 +158,37 @@ func (c *Client) ListFlavors(ctx context.Context) ([]Flavor, error) {
 	}
 	out := make([]Flavor, 0, len(fs))
 	for _, f := range fs {
-		out = append(out, Flavor{ID: f.ID, Name: f.Name, VCPUs: f.VCPUs, RAM: f.RAM, Disk: f.Disk})
+		es := f.ExtraSpecs
+		if es == nil {
+			es = map[string]string{}
+		}
+		out = append(out, Flavor{ID: f.ID, Name: f.Name, VCPUs: f.VCPUs, RAM: f.RAM, Disk: f.Disk, ExtraSpecs: es})
 	}
 	return out, nil
 }
 
 // GetFlavor resolves one Nova flavor to its specs as a free-form map (id/name/ram/vcpus/disk +
-// originalName). Used to enrich a server's `flavor:{id,links}` (the newer nova microversion omits
-// specs) so the client server-detail/list shows real vCPU/RAM/disk instead of NaN.
+// originalName + extra_specs). Used to enrich a server's `flavor:{id,links}` (the newer nova
+// microversion omits specs) so the client server-detail/list shows real vCPU/RAM/disk instead of
+// NaN, and so the billing cron can rate GPUs (pci_passthrough:alias) from the cached doc.
+// extra_specs is always present (possibly empty) — the enrich path keys idempotence on it.
 func (c *Client) GetFlavor(ctx context.Context, id string) (map[string]any, error) {
 	cc, err := openstack.NewComputeV2(c.provider, c.endpointOpts())
 	if err != nil {
 		return nil, err
 	}
+	cc.Microversion = flavorMicroversion
 	f, err := flavors.Get(ctx, cc, id).Extract()
 	if err != nil {
 		return nil, err
 	}
+	es := f.ExtraSpecs
+	if es == nil {
+		es = map[string]string{}
+	}
 	return map[string]any{
 		"id": f.ID, "name": f.Name, "originalName": f.Name, "original_name": f.Name,
-		"ram": f.RAM, "vcpus": f.VCPUs, "disk": f.Disk,
+		"ram": f.RAM, "vcpus": f.VCPUs, "disk": f.Disk, "extra_specs": es,
 	}, nil
 }
 

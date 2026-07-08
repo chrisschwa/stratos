@@ -1,0 +1,90 @@
+{
+  "_readme": [
+    "Competitor-mapped public rate card (docs/pricing-rate-card.md). Apply after sign-off:",
+    "1) POST /api/v1/admin/price-plan   with .plan  -> note the returned id",
+    "2) For each .rules[]: set pricePlanId to that id, POST /api/v1/admin/price-plan/rule",
+    "All prices USD/hour (platform base currency must be USD).",
+    "GPU rules are additive on top of the CPU/RAM component rules — see the rate card's",
+    "calibration note before changing values. gpu_model aliases follow the pci-alias form."
+  ],
+  "plan": {
+    "name": "Public rate card",
+    "enabled": true,
+    "accessMode": "PUBLIC",
+    "serviceProviders": []
+  },
+  "rules": [
+    {
+      "name": "Compute — CPU + RAM components",
+      "timeUnit": "hour",
+      "resourceType": "instance",
+      "pricePlanId": "<PLAN_ID>",
+      "applyMethod": "ADD_TO_TOTAL",
+      "prices": [
+        { "attributeName": "vcpus", "tiers": [{ "value": "0.008" }] },
+        { "attributeName": "ram_gb", "tiers": [{ "value": "0.004" }] }
+      ],
+      "filters": [],
+      "modifiers": []
+    },
+    { "name": "GPU — rtx-4090", "timeUnit": "hour", "resourceType": "instance", "pricePlanId": "<PLAN_ID>", "applyMethod": "ADD_TO_TOTAL", "prices": [{ "attributeName": "gpu_count", "tiers": [{ "value": "0.65" }] }], "filters": [{ "attributeName": "gpu_model", "operator": "eq", "value": "rtx-4090" }], "modifiers": [] },
+    { "name": "GPU — rtx-5090", "timeUnit": "hour", "resourceType": "instance", "pricePlanId": "<PLAN_ID>", "applyMethod": "ADD_TO_TOTAL", "prices": [{ "attributeName": "gpu_count", "tiers": [{ "value": "0.95" }] }], "filters": [{ "attributeName": "gpu_model", "operator": "eq", "value": "rtx-5090" }], "modifiers": [] },
+    { "name": "GPU — l40s", "timeUnit": "hour", "resourceType": "instance", "pricePlanId": "<PLAN_ID>", "applyMethod": "ADD_TO_TOTAL", "prices": [{ "attributeName": "gpu_count", "tiers": [{ "value": "0.95" }] }], "filters": [{ "attributeName": "gpu_model", "operator": "eq", "value": "l40s" }], "modifiers": [] },
+    { "name": "GPU — a40", "timeUnit": "hour", "resourceType": "instance", "pricePlanId": "<PLAN_ID>", "applyMethod": "ADD_TO_TOTAL", "prices": [{ "attributeName": "gpu_count", "tiers": [{ "value": "0.42" }] }], "filters": [{ "attributeName": "gpu_model", "operator": "eq", "value": "a40" }], "modifiers": [] },
+    { "name": "GPU — a6000", "timeUnit": "hour", "resourceType": "instance", "pricePlanId": "<PLAN_ID>", "applyMethod": "ADD_TO_TOTAL", "prices": [{ "attributeName": "gpu_count", "tiers": [{ "value": "0.47" }] }], "filters": [{ "attributeName": "gpu_model", "operator": "eq", "value": "a6000" }], "modifiers": [] },
+    { "name": "GPU — a100-80gb", "timeUnit": "hour", "resourceType": "instance", "pricePlanId": "<PLAN_ID>", "applyMethod": "ADD_TO_TOTAL", "prices": [{ "attributeName": "gpu_count", "tiers": [{ "value": "1.35" }] }], "filters": [{ "attributeName": "gpu_model", "operator": "eq", "value": "a100-80gb" }], "modifiers": [] },
+    { "name": "GPU — a100-sxm-80gb", "timeUnit": "hour", "resourceType": "instance", "pricePlanId": "<PLAN_ID>", "applyMethod": "ADD_TO_TOTAL", "prices": [{ "attributeName": "gpu_count", "tiers": [{ "value": "1.45" }] }], "filters": [{ "attributeName": "gpu_model", "operator": "eq", "value": "a100-sxm-80gb" }], "modifiers": [] },
+    { "name": "GPU — h100-pcie", "timeUnit": "hour", "resourceType": "instance", "pricePlanId": "<PLAN_ID>", "applyMethod": "ADD_TO_TOTAL", "prices": [{ "attributeName": "gpu_count", "tiers": [{ "value": "2.79" }] }], "filters": [{ "attributeName": "gpu_model", "operator": "eq", "value": "h100-pcie" }], "modifiers": [] },
+    { "name": "GPU — h100-sxm", "timeUnit": "hour", "resourceType": "instance", "pricePlanId": "<PLAN_ID>", "applyMethod": "ADD_TO_TOTAL", "prices": [{ "attributeName": "gpu_count", "tiers": [{ "value": "3.19" }] }], "filters": [{ "attributeName": "gpu_model", "operator": "eq", "value": "h100-sxm" }], "modifiers": [] },
+    { "name": "GPU — h200", "timeUnit": "hour", "resourceType": "instance", "pricePlanId": "<PLAN_ID>", "applyMethod": "ADD_TO_TOTAL", "prices": [{ "attributeName": "gpu_count", "tiers": [{ "value": "4.29" }] }], "filters": [{ "attributeName": "gpu_model", "operator": "eq", "value": "h200" }], "modifiers": [] },
+    { "name": "GPU — b200", "timeUnit": "hour", "resourceType": "instance", "pricePlanId": "<PLAN_ID>", "applyMethod": "ADD_TO_TOTAL", "prices": [{ "attributeName": "gpu_count", "tiers": [{ "value": "5.75" }] }], "filters": [{ "attributeName": "gpu_model", "operator": "eq", "value": "b200" }], "modifiers": [] },
+    {
+      "name": "Public egress — 1 TiB free, then $0.01/GB",
+      "timeUnit": "hour",
+      "resourceType": "instance_traffic",
+      "pricePlanId": "<PLAN_ID>",
+      "applyMethod": "ADD_TO_TOTAL",
+      "prices": [
+        {
+          "attributeName": "outgoing_public_traffic_mb",
+          "tiers": [
+            { "from": "0", "to": "1048576", "value": "0" },
+            { "from": "1048576", "value": "0.00001" }
+          ]
+        }
+      ],
+      "filters": [],
+      "modifiers": []
+    },
+    {
+      "name": "Block storage",
+      "timeUnit": "hour",
+      "resourceType": "volume",
+      "pricePlanId": "<PLAN_ID>",
+      "applyMethod": "ADD_TO_TOTAL",
+      "prices": [{ "attributeName": "size", "tiers": [{ "value": "0.000137" }] }],
+      "filters": [],
+      "modifiers": []
+    },
+    {
+      "name": "Floating IP",
+      "timeUnit": "hour",
+      "resourceType": "floating_ip",
+      "pricePlanId": "<PLAN_ID>",
+      "applyMethod": "ADD_TO_TOTAL",
+      "prices": [{ "attributeName": "existence", "tiers": [{ "value": "0.005" }] }],
+      "filters": [],
+      "modifiers": []
+    },
+    {
+      "name": "Load balancer",
+      "timeUnit": "hour",
+      "resourceType": "load_balancer",
+      "pricePlanId": "<PLAN_ID>",
+      "applyMethod": "ADD_TO_TOTAL",
+      "prices": [{ "attributeName": "existence", "tiers": [{ "value": "0.0165" }] }],
+      "filters": [],
+      "modifiers": []
+    }
+  ]
+}

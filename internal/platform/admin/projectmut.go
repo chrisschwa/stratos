@@ -66,6 +66,7 @@ func (h *Handler) routeProjectMut(r chi.Router) {
 	r.Get("/project/{id}/external-service/{externalServiceId}", h.projectAddExternalService)
 	r.Post("/project/{id}/sync", h.projectSync)
 	r.Put("/project/{id}", h.projectUpdate)
+	r.Put("/project/{id}/quota", h.projectSetQuota)
 	r.Put("/project/{id}/public-networks", h.projectSetPublicNetworks)
 	r.Delete("/project/{id}", h.projectScheduleDeletion)
 	r.Delete("/project/{id}/now", h.projectDeleteNow)

@@ -30,6 +30,8 @@ func (h *Handler) routeCloudAdmin(r chi.Router) {
 	r.Get("/service/os-images", h.osImagesAll)
 	r.Get("/service/regions", h.serviceRegionsList)
 	r.Get("/service/{id}/os-images", h.osImagesByService)
+	r.Get("/service/{id}/gpu-info", h.gpuInfo)
+	r.Get("/service/{id}/unpriced-flavors", h.unpricedFlavors)
 	r.Get("/service/{id}/volume/types", h.volumeTypes)
 	r.Get("/service/{id}/share/protocols", h.shareProtocols)
 	r.Get("/service/{id}/availability-zones", h.availabilityZones)
@@ -211,6 +213,38 @@ func (h *Handler) imagesByLocation(ctx context.Context, es *externalservice.Exte
 		})
 	}
 	return out
+}
+
+// GPURegionCapacity is the gpu-info response entry: one region's per-model GPU device counts.
+type GPURegionCapacity struct {
+	Region string               `json:"region"`
+	Gpus   []client.GPUCapacity `json:"gpus"`
+}
+
+// gpuInfo handles GET /admin/service/{id}/gpu-info: per region, the cluster-wide GPU device
+// capacity per model from Placement (see client.GPUInfo). Cloud errors skip that region
+// (best-effort, same posture as the other live reads here). ADMIN_SERVICE_READ.
+func (h *Handler) gpuInfo(w http.ResponseWriter, r *http.Request) {
+	if !h.require(w, r, "admin:service:read") {
+		return
+	}
+	es, ok := h.loadServiceOr(w, r, chi.URLParam(r, "id"))
+	if !ok {
+		return
+	}
+	out := []GPURegionCapacity{}
+	for _, region := range h.serviceRegions(es) {
+		cc, err := h.cloudClient(r.Context(), es, region)
+		if err != nil || cc == nil {
+			continue
+		}
+		gpus, err := cc.GPUInfo(r.Context())
+		if err != nil {
+			continue
+		}
+		out = append(out, GPURegionCapacity{Region: region, Gpus: gpus})
+	}
+	httpx.List(w, out)
 }
 
 // volumeTypes handles getVolumeTypes: per region, the Cinder volume-type names. ADMIN_SERVICE_READ.

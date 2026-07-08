@@ -9,6 +9,7 @@ import { StatusBadge } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Input } from "@/components/ui/input"
 import {
   Dialog,
   DialogContent,
@@ -43,8 +44,13 @@ type ProjectDoc = {
   services?: Array<{ serviceId?: string; externalProjectId?: string }>
   // absent/null = all external networks allowed; array = allow-list of Neutron network ids.
   publicNetworkIds?: string[] | null
+  // Admin-managed per-project quota; gpu = {model alias (or "*") → device limit}.
+  quota?: { gpu?: Record<string, number> }
   createdAt?: string
 }
+
+// GET /admin/service/{id}/gpu-info (cloudadmin.go gpuInfo) — per-region GPU capacity.
+type GpuRegionCapacity = { region: string; gpus: Array<{ name: string; total: number; inUse: number }> }
 
 // GET /admin/cloud-resource/public-networks/{externalServiceId} (cloudadmin.go publicNetworks) —
 // the provider's router:external networks.
@@ -158,6 +164,20 @@ export default function ProjectDetailPage() {
 
   const enabled = (project?.status ?? "").toUpperCase() === "ENABLED"
 
+  // GPU quota tab state: rows derive from project.quota.gpu; the model picker offers the
+  // provider's live GPU models (placement gpu-info) plus the "*" wildcard.
+  const gpuInfo = useAdminList<GpuRegionCapacity>(`/admin/service/${externalServiceId}/gpu-info`, !!externalServiceId)
+  const [quotaRows, setQuotaRows] = useState<Array<{ model: string; limit: string }>>([])
+  const [quotaModel, setQuotaModel] = useState("")
+  const [quotaLimit, setQuotaLimit] = useState("")
+  useEffect(() => {
+    setQuotaRows(Object.entries(project?.quota?.gpu ?? {}).map(([model, limit]) => ({ model, limit: String(limit) })))
+  }, [project?.quota])
+  const gpuModelOptions = [
+    "*",
+    ...new Set((gpuInfo.data?.data ?? []).flatMap((r) => r.gpus.map((g) => g.name))),
+  ].filter((m) => !quotaRows.some((row) => row.model === m))
+
   const invalidateProject = () => {
     qc.invalidateQueries({ queryKey: ["admin-get", projectPath] })
     qc.invalidateQueries({ queryKey: ["admin-list", `${projectPath}/members`] })
@@ -242,6 +262,25 @@ export default function ProjectDetailPage() {
       toast.success("Organization updated")
       setOrgOpen(false)
       setOrgChoice("")
+      invalidateProject()
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  // PUT /admin/project/{id}/quota (projectquota.go) — stores {gpu:{model→limit}}; enforcement is
+  // the server create/resize gate. An empty object clears the quota (unlimited).
+  const saveQuota = useMutation({
+    mutationFn: (rows: Array<{ model: string; limit: string }>) => {
+      const gpu = Object.fromEntries(
+        rows.filter((r) => r.model && r.limit.trim() !== "").map((r) => [r.model, Number(r.limit)]),
+      )
+      return apiFetch(`${projectPath}/quota`, {
+        method: "PUT",
+        body: Object.keys(gpu).length ? { gpu } : {},
+      })
+    },
+    onSuccess: () => {
+      toast.success("Project quota saved")
       invalidateProject()
     },
     onError: (e: Error) => toast.error(e.message),
@@ -355,6 +394,7 @@ export default function ProjectDetailPage() {
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="members">Members</TabsTrigger>
             <TabsTrigger value="resources">Cloud resources</TabsTrigger>
+            <TabsTrigger value="quota">Quota</TabsTrigger>
           </TabsList>
 
           <TabsContent value="overview" className="mt-4 space-y-6">
@@ -614,6 +654,102 @@ export default function ProjectDetailPage() {
                 </Table>
               </Card>
             )}
+          </TabsContent>
+
+          <TabsContent value="quota" className="mt-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">GPU quota</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <p className="text-sm text-muted-foreground">
+                  Per-model GPU device limits, enforced when servers are created or resized through
+                  Stratos. No entry = unlimited; "*" applies to any model without its own row.
+                  Horizon-direct usage on imported projects bypasses this gate.
+                </p>
+                {quotaRows.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No GPU limits configured.</p>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>GPU model</TableHead>
+                        <TableHead className="w-32">Limit</TableHead>
+                        <TableHead />
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {quotaRows.map((row, i) => (
+                        <TableRow key={row.model}>
+                          <TableCell className="font-mono text-xs">{row.model}</TableCell>
+                          <TableCell>
+                            <Input
+                              type="number"
+                              min={0}
+                              className="w-24"
+                              value={row.limit}
+                              onChange={(e) =>
+                                setQuotaRows((rows) => rows.map((r, idx) => (idx === i ? { ...r, limit: e.target.value } : r)))
+                              }
+                            />
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => setQuotaRows((rows) => rows.filter((_, idx) => idx !== i))}
+                            >
+                              Remove
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+                <div className="flex flex-wrap items-end gap-3">
+                  <div className="space-y-1.5">
+                    <p className="text-xs text-muted-foreground">GPU model</p>
+                    <Select value={quotaModel} onValueChange={setQuotaModel}>
+                      <SelectTrigger className="w-56">
+                        <SelectValue placeholder="Select model" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {gpuModelOptions.map((m) => (
+                          <SelectItem key={m} value={m}>
+                            {m === "*" ? "* (any model)" : m}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <p className="text-xs text-muted-foreground">Limit</p>
+                    <Input
+                      type="number"
+                      min={0}
+                      className="w-24"
+                      value={quotaLimit}
+                      onChange={(e) => setQuotaLimit(e.target.value)}
+                    />
+                  </div>
+                  <Button
+                    variant="outline"
+                    disabled={!quotaModel || quotaLimit.trim() === ""}
+                    onClick={() => {
+                      setQuotaRows((rows) => [...rows, { model: quotaModel, limit: quotaLimit }])
+                      setQuotaModel("")
+                      setQuotaLimit("")
+                    }}
+                  >
+                    Add limit
+                  </Button>
+                  <Button onClick={() => saveQuota.mutate(quotaRows)} disabled={saveQuota.isPending}>
+                    {saveQuota.isPending ? "Saving…" : "Save quota"}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
           </TabsContent>
         </Tabs>
       )}

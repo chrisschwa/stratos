@@ -75,3 +75,27 @@ Open the provider and go to its **Provisioning** tab. List every Keystone role a
 - A periodic sync starts against the region. Existing projects, servers, volumes, networks, images, and other resources are pulled into the cloud-resource inventory so billing accrual can begin.
 - As billing profiles are activated, new client projects get created in Keystone, tagged by Stratos.
 - Every service defaults to available; adjust that on the provider's **Services** tab — see [Service Availability](/docs/platform-admin/cloud/service-availability).
+
+## GPU capacity and quotas
+
+The provider's **GPU** tab shows cluster-wide GPU capacity per model, read live from the
+Placement API. It expects nova *PCI in placement*: each GPU device is a resource provider
+carrying the `COMPUTE_MANAGED_PCI_DEVICE` and `CUSTOM_PCI_GPU` traits plus a
+`CUSTOM_PCI_<MODEL>` trait naming the model — that trait becomes the model alias
+(`CUSTOM_PCI_A100_80GB` → `a100-80gb`) used everywhere GPU-related: pricing rules
+(`gpu_model`), this capacity view, and project quotas. A device counts as *in use* when
+its resource provider has any allocation. The same tab lists **unpriced flavors** — live
+flavors that match no enabled public price rule and would therefore bill zero.
+
+The dashboard shows the same capacity as a per-model usage bar.
+
+### Per-project GPU quota (two tiers)
+
+- **Tier 1 — Stratos**: on a project's **Quota** tab, set per-model device limits
+  (`a100-80gb → 4`, or `*` as a catch-all). Stratos enforces them when servers are
+  created or resized through the client portal/API — a request that would exceed the
+  limit is rejected with a clear error. No entry means unlimited.
+- **Tier 2 — the cloud itself**: workloads driven directly through Horizon/OpenStack on
+  imported projects bypass Stratos. Nova's legacy quotas have no GPU class, so cap those
+  projects with instance/core quotas in Horizon as a proxy (or evaluate nova unified
+  limits for native per-resource-class quotas).

@@ -38,8 +38,10 @@ func (c *Client) ListVolumeSnapshots(ctx context.Context) ([]map[string]any, err
 }
 
 // ListServerGroups returns the project's Nova server groups (data.serverGroup shape).
+// Pinned to the server-group microversion so soft-* policy groups list cleanly (see
+// serverGroupMicroversion — at 2.1, nova 2025.1 response validation logs an ERROR per sync).
 func (c *Client) ListServerGroups(ctx context.Context) ([]map[string]any, error) {
-	cc, err := c.compute()
+	cc, err := c.computeServerGroups()
 	if err != nil {
 		return nil, err
 	}

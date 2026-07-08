@@ -54,6 +54,29 @@ Target: a 2-vCPU / 4 GB instance at ~30 €/month, priced hourly
 
 Rules can also carry filters — applying the price only when a resource attribute meets a condition — plus modifiers, both stored alongside the rule.
 
+## GPU pricing
+
+Instances expose two GPU attributes derived from the flavor's extra specs
+(`pci_passthrough:alias`): `gpu_count` (number of devices) and `gpu_model` (the alias,
+e.g. `a100-80gb` — the same name the provider's GPU capacity tab and project GPU quotas use).
+Price GPU flavors per model with one rule each:
+
+```
+Rule "GPU — a100-80gb"   resource type: instance   time unit: hour
+  Filter:  gpu_model  eq  a100-80gb
+  Price:   gpu_count  →  1.35 $/h per device
+```
+
+The GPU rule adds on top of your per-vCPU / per-GB rules, so a GPU flavor's total is
+`CPU/RAM components + gpu_count × model rate`. Non-GPU flavors carry `gpu_count = 0` and
+are unaffected. A ready-made competitor-benchmarked rate card (RunPod/Lambda for GPU,
+DigitalOcean/OVH/AWS for the rest) ships in the repo: `docs/pricing-rate-card.md` +
+`deploy/seed/price-plan-seed.json`.
+
+**Guard:** a resource that matches no enabled rule bills **zero, silently**. The cloud
+provider's **GPU tab** lists *unpriced flavors* — live flavors matching no enabled public
+rule — check it after adding flavors or editing rules.
+
 ## Price adjustment rules
 
 On top of per-resource pricing, a plan can hold adjustment rules: tiered surcharges or discounts applied to the already-rated amount. Every tier pairs a starting amount with a modifier (`add` or `subtract`, expressed as a percentage or an absolute value), which lets you model things like volume discounts that deepen as spend climbs. The **Usage** action on an adjustment rule reports how much it has actually added or taken off.

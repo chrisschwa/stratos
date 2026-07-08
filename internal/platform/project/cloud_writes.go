@@ -537,7 +537,9 @@ func enrichServerFlavor(ctx context.Context, cc *client.Client, srv map[string]a
 	if !ok || fl == nil {
 		return
 	}
-	if _, has := fl["vcpus"]; has {
+	// Idempotence keys on extra_specs (GetFlavor always sets it, possibly empty) — not on
+	// vcpus — so pre-GPU cached docs re-enrich once and gain the GPU specs billing needs.
+	if _, has := fl["extra_specs"]; has {
 		return
 	}
 	id, _ := fl["id"].(string)
@@ -607,6 +609,12 @@ func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 				h.fail(w, httpx.BadRequest("External network is not enabled for this project"))
 				return
 			}
+		}
+		// Tier-1 GPU quota gate (project quota.gpu, admin-managed) — 409 when the flavor's
+		// GPU demand would exceed the project limit.
+		if err := h.enforceGPUQuota(r.Context(), proj, svcID, strAny(req.Data["flavorId"]), nil); err != nil {
+			h.fail(w, err)
+			return
 		}
 	}
 	uid := u.ID
@@ -789,7 +797,10 @@ func (h *Handler) cloudBulkAction(w http.ResponseWriter, r *http.Request) {
 				for _, f := range fs {
 					out = append(out, map[string]any{
 						"externalId": f.ID, "serviceId": svcID, "region": region, "type": cloud.TypeServer,
-						"data": map[string]any{"id": f.ID, "name": f.Name, "vcpus": f.VCPUs, "ram": f.RAM, "disk": f.Disk},
+						"data": map[string]any{
+							"id": f.ID, "name": f.Name, "vcpus": f.VCPUs, "ram": f.RAM, "disk": f.Disk,
+							"extra_specs": f.ExtraSpecs,
+						},
 					})
 				}
 				result = out
@@ -1323,6 +1334,23 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 	// UPDATE / GET_TEMPLATE collide across types), cc-based (full control of the result shape).
 	if h.clusterAction(w, r, proj, svcID, cr, externalID, req.Action, req.Data) {
 		return
+	}
+
+	// Tier-1 GPU quota gate on server RESIZE: the target flavor's GPU demand must fit the
+	// project quota after the current flavor's devices free up (409 when over).
+	action := strings.ToUpper(req.Action)
+	if action == "INVOKEACTION" {
+		action = strings.ToUpper(strAny(req.Data["action"]))
+	}
+	if action == "RESIZE" && cr != nil && cr.Type == cloud.TypeServer {
+		var replaced map[string]any
+		if srv, ok := cr.Data["server"].(map[string]any); ok {
+			replaced, _ = srv["flavor"].(map[string]any)
+		}
+		if err := h.enforceGPUQuota(r.Context(), proj, svcID, strAny(req.Data["flavorId"]), replaced); err != nil {
+			h.fail(w, err)
+			return
+		}
 	}
 
 	// Mutating actions → WriteService (resolves by externalId, now correct). The FE's

@@ -494,6 +494,109 @@ function QuotaTab({ id, provider }: TabProps) {
   )
 }
 
+// ── 6b. GPU (placement capacity + unpriced-flavor guard) ─────────────────────
+type GpuRegionCapacity = { region: string; gpus: Array<{ name: string; total: number; inUse: number }> }
+type UnpricedFlavor = { region: string; id: string; name: string; gpuModel?: string; gpuCount?: number }
+
+function GpuTab({ id }: { id: string }) {
+  const capQ = useAdminGet<GpuRegionCapacity[]>(`/admin/service/${id}/gpu-info`)
+  const unpricedQ = useAdminGet<UnpricedFlavor[]>(`/admin/service/${id}/unpriced-flavors`)
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">GPU capacity</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {capQ.isLoading ? (
+            <Skeleton className="h-24" />
+          ) : (capQ.data ?? []).flatMap((r) => r.gpus).length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No GPU devices found in placement (expects nova PCI-in-placement resource providers
+              carrying the CUSTOM_PCI_GPU trait).
+            </p>
+          ) : (
+            <div className="space-y-6">
+              {(capQ.data ?? []).map((r) => (
+                <div key={r.region} className="space-y-2">
+                  <p className="text-sm font-medium">{r.region}</p>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>GPU model</TableHead>
+                        <TableHead className="text-right">In use</TableHead>
+                        <TableHead className="text-right">Free</TableHead>
+                        <TableHead className="text-right">Total</TableHead>
+                        <TableHead className="w-48">Usage</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {r.gpus.map((g) => (
+                        <TableRow key={g.name}>
+                          <TableCell className="font-mono text-xs">{g.name}</TableCell>
+                          <TableCell className="text-right tabular-nums">{g.inUse}</TableCell>
+                          <TableCell className="text-right tabular-nums">{g.total - g.inUse}</TableCell>
+                          <TableCell className="text-right tabular-nums">{g.total}</TableCell>
+                          <TableCell>
+                            <div className="h-2 w-full rounded bg-muted">
+                              <div
+                                className="h-2 rounded bg-primary"
+                                style={{ width: `${g.total ? Math.round((g.inUse / g.total) * 100) : 0}%` }}
+                              />
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Unpriced flavors</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {unpricedQ.isLoading ? (
+            <Skeleton className="h-16" />
+          ) : (unpricedQ.data ?? []).length === 0 ? (
+            <p className="text-sm text-muted-foreground">Every live flavor matches at least one enabled public price rule.</p>
+          ) : (
+            <div className="space-y-3">
+              <p className="text-sm text-destructive">
+                These flavors match no enabled public price rule — servers on them bill ZERO.
+              </p>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Flavor</TableHead>
+                    <TableHead>Region</TableHead>
+                    <TableHead>GPU</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {(unpricedQ.data ?? []).map((f) => (
+                    <TableRow key={`${f.region}-${f.id}`}>
+                      <TableCell>{f.name}</TableCell>
+                      <TableCell>{f.region}</TableCell>
+                      <TableCell className="font-mono text-xs">
+                        {f.gpuModel ? `${f.gpuModel} × ${f.gpuCount}` : "—"}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
 // ── 7. VHI-ostor (config.vhiOstorConfig + write-only secret auth) ─────────────
 function VhiOstorTab({ id, provider }: TabProps) {
   const cfg = asObj((provider.config as Obj)?.vhiOstorConfig)
@@ -979,6 +1082,7 @@ const TAB_DEFS = [
   { v: "provisioning", label: "Provisioning" },
   { v: "features", label: "Features" },
   { v: "quota", label: "Quota" },
+  { v: "gpu", label: "GPU" },
   { v: "vhi-ostor", label: "VHI-ostor" },
   { v: "advanced", label: "Advanced" },
   { v: "volume-types", label: "Volume types" },
@@ -1046,6 +1150,9 @@ export default function CloudProviderDetailPage() {
         </TabsContent>
         <TabsContent value="quota" className="mt-4">
           <QuotaTab id={id} provider={p} />
+        </TabsContent>
+        <TabsContent value="gpu" className="mt-4">
+          <GpuTab id={id} />
         </TabsContent>
         <TabsContent value="vhi-ostor" className="mt-4">
           <VhiOstorTab id={id} provider={p} />

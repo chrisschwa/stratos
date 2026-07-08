@@ -47,10 +47,13 @@ type Project struct {
 	// PublicNetworkIds is the admin-managed external-network allow-list: nil/absent = ALL
 	// router:external networks allowed (the default); non-nil = only these Neutron network ids
 	// (empty = none).
-	PublicNetworkIds       []string   `json:"publicNetworkIds,omitempty"`
-	ScheduledForDeletionAt *time.Time `json:"scheduledForDeletionAt,omitempty"`
-	CreatedAt              *time.Time `json:"createdAt,omitempty"`
-	UpdatedAt              *time.Time `json:"updatedAt,omitempty"`
+	PublicNetworkIds []string `json:"publicNetworkIds,omitempty"`
+	// Quota is the admin-managed per-project quota config (stored JSON; enforced at the
+	// Stratos cloud gate, never pushed to OpenStack). Shape: {"gpu": {"<model>": n, "*": n}}.
+	Quota                  map[string]any `json:"quota,omitempty"`
+	ScheduledForDeletionAt *time.Time     `json:"scheduledForDeletionAt,omitempty"`
+	CreatedAt              *time.Time     `json:"createdAt,omitempty"`
+	UpdatedAt              *time.Time     `json:"updatedAt,omitempty"`
 }
 
 // MarshalJSON serializes Project with NULL fields OMITTED (data, billingProfileId,
@@ -82,13 +85,14 @@ func (p Project) MarshalJSON() ([]byte, error) {
 		CustomInfo             map[string]any `json:"customInfo"`
 		Services               []any          `json:"services"`
 		PublicNetworkIds       []string       `json:"publicNetworkIds,omitempty"`
+		Quota                  map[string]any `json:"quota,omitempty"`
 		ScheduledForDeletionAt *time.Time     `json:"scheduledForDeletionAt,omitempty"`
 		CreatedAt              *time.Time     `json:"createdAt,omitempty"`
 		UpdatedAt              *time.Time     `json:"updatedAt,omitempty"`
 	}{
 		ID: p.ID, Name: p.Name, Status: p.Status, Data: p.Data, Owner: p.Owner,
 		Memberships: ms, OrganizationID: p.OrganizationID, BillingProfileID: p.BillingProfileID,
-		CustomInfo: ci, Services: svc, PublicNetworkIds: p.PublicNetworkIds,
+		CustomInfo: ci, Services: svc, PublicNetworkIds: p.PublicNetworkIds, Quota: p.Quota,
 		ScheduledForDeletionAt: p.ScheduledForDeletionAt,
 		CreatedAt:              p.CreatedAt, UpdatedAt: p.UpdatedAt,
 	})

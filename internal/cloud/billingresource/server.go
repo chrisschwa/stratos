@@ -72,6 +72,12 @@ func (p *ServerProvider) instanceBR(cr *cloud.CloudResource, notEligible bool) *
 		"is_bareMetal":      false,
 		"availability_zone": server["availabilityZone"],
 	}
+	// GPU pricing dimension: model alias + device count from the flavor's extra specs
+	// (rules filter on gpu_model and price gpu_count). Zero/"" for non-GPU flavors.
+	es, _ := mapAt(flavor, "extra_specs")
+	gpuModel, gpuCount := cloud.GPUFromFlavor(es)
+	values["gpu_model"] = gpuModel
+	values["gpu_count"] = gpuCount
 	if img, ok := mapAt(server, "image"); ok {
 		values["image"] = img["id"]
 	}
@@ -130,6 +136,7 @@ func instanceType() *pricing.BillingResourceType {
 	s := func(n string) pricing.ResourceAttribute { return pricing.ResourceAttribute{Name: n, Type: "string"} }
 	return &pricing.BillingResourceType{ResourceType: "instance", Attributes: []pricing.ResourceAttribute{
 		s("instance_type"), num("ram_mb"), num("ram_gb"), num("vcpus"), num("root_disk_gb"),
+		num("gpu_count"), s("gpu_model"),
 		s("display_name"), s("host"), s("status"), s("image"),
 		{Name: "is_bareMetal", Type: "boolean"}, s("availability_zone"),
 	}}

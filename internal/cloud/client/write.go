@@ -832,16 +832,33 @@ func (c *Client) RetypeVolume(ctx context.Context, id, newType, migrationPolicy 
 
 // ── Server groups ────────────────────────────────────────────────────────────────────────────────
 
+// serverGroupMicroversion: nova ≥ 2.15 accepts soft-affinity/soft-anti-affinity policies —
+// in the create schema AND the (2025.1+ schema-validated) list/get responses. At the default
+// 2.1 a soft-* create 400s, and every sync LIST of a project holding a soft-policy group makes
+// nova-api log a "Schema failed to validate" ERROR. Stay below 2.64 so the pre-2.64 Policies
+// array body keeps working.
+const serverGroupMicroversion = "2.15"
+
+// computeServerGroups is the compute client pinned to the server-group microversion.
+func (c *Client) computeServerGroups() (*gophercloud.ServiceClient, error) {
+	cc, err := c.compute()
+	if err != nil {
+		return nil, err
+	}
+	cc.Microversion = serverGroupMicroversion
+	return cc, nil
+}
+
 // CreateServerGroupOpts mirrors CreateServerGroupRequest {name, policy}.
 type CreateServerGroupOpts struct {
 	Name   string
 	Policy string
 }
 
-// CreateServerGroup creates a nova server group (affinity/anti-affinity). Uses the pre-2.64 Policies
-// array form for broad microversion compatibility.
+// CreateServerGroup creates a nova server group (affinity/anti-affinity/soft-*). Uses the
+// pre-2.64 Policies array form for broad microversion compatibility.
 func (c *Client) CreateServerGroup(ctx context.Context, o CreateServerGroupOpts) (map[string]any, error) {
-	cc, err := c.compute()
+	cc, err := c.computeServerGroups()
 	if err != nil {
 		return nil, err
 	}
@@ -858,7 +875,7 @@ func (c *Client) CreateServerGroup(ctx context.Context, o CreateServerGroupOpts)
 
 // GetServerGroup fetches a nova server group (backs GET_MEMBERS — the group embeds member ids).
 func (c *Client) GetServerGroup(ctx context.Context, id string) (map[string]any, error) {
-	cc, err := c.compute()
+	cc, err := c.computeServerGroups()
 	if err != nil {
 		return nil, err
 	}
@@ -871,7 +888,7 @@ func (c *Client) GetServerGroup(ctx context.Context, id string) (map[string]any,
 
 // DeleteServerGroup removes a nova server group.
 func (c *Client) DeleteServerGroup(ctx context.Context, id string) error {
-	cc, err := c.compute()
+	cc, err := c.computeServerGroups()
 	if err != nil {
 		return err
 	}

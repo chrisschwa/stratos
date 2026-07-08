@@ -1,9 +1,9 @@
-import { CheckCircle2, CircleAlert, CreditCard, FolderKanban, Server, Users } from "lucide-react"
+import { CheckCircle2, CircleAlert, CreditCard, Cpu, FolderKanban, Server, Users } from "lucide-react"
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
-import { useAdminStats } from "@/lib/hooks"
+import { useAdminList, useAdminStats } from "@/lib/hooks"
 
 function Stat({ label, value, icon: Icon }: { label: string; value: number | string | undefined; icon: React.ComponentType<{ className?: string }> }) {
   return (
@@ -14,6 +14,59 @@ function Stat({ label, value, icon: Icon }: { label: string; value: number | str
           <p className="mt-1 font-display text-2xl font-semibold tabular-nums">{value ?? "—"}</p>
         </div>
         <Icon className="size-5 text-muted-foreground/50" />
+      </CardContent>
+    </Card>
+  )
+}
+
+// GPU capacity (placement gpu-info) — one row block per cloud provider; hides itself
+// when the provider reports no GPU resource providers.
+type GpuRegionCapacity = { region: string; gpus: Array<{ name: string; total: number; inUse: number }> }
+
+function ServiceGpuRows({ svc }: { svc: { id: string; name?: string } }) {
+  const q = useAdminList<GpuRegionCapacity>(`/admin/service/${svc.id}/gpu-info`, !!svc.id)
+  if (q.isLoading) return <Skeleton className="h-10" />
+  const rows = (q.data?.data ?? []).flatMap((r) => r.gpus.map((g) => ({ ...g, region: r.region })))
+  if (rows.length === 0) return null
+  return (
+    <div className="space-y-2">
+      <p className="text-xs text-muted-foreground">{svc.name ?? svc.id}</p>
+      {rows.map((g) => (
+        <div key={`${g.region}-${g.name}`} className="flex items-center gap-3 text-sm">
+          <span className="w-40 truncate font-mono text-xs">{g.name}</span>
+          <div className="h-2 flex-1 rounded bg-muted">
+            <div
+              className="h-2 rounded bg-primary"
+              style={{ width: `${g.total ? Math.round((g.inUse / g.total) * 100) : 0}%` }}
+            />
+          </div>
+          <span className="w-20 text-right tabular-nums text-xs text-muted-foreground">
+            {g.inUse}/{g.total} used
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function GpuCapacityCard() {
+  const services = useAdminList<{ id: string; name?: string }>("/admin/service")
+  const list = services.data?.data ?? []
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Cpu className="size-4 text-muted-foreground/70" /> GPU capacity
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {services.isLoading ? (
+          <Skeleton className="h-16" />
+        ) : list.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No cloud providers configured.</p>
+        ) : (
+          list.map((s) => <ServiceGpuRows key={s.id} svc={s} />)
+        )}
       </CardContent>
     </Card>
   )
@@ -101,6 +154,10 @@ export function DashboardPage() {
             </ResponsiveContainer>
           </CardContent>
         </Card>
+      </div>
+
+      <div className="mt-4">
+        <GpuCapacityCard />
       </div>
 
       <div className="mt-4">
