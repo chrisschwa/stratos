@@ -38,8 +38,10 @@ func NewHandler(svc *Service, policy *Policy, repo *Repo, users *user.Repo, a *a
 func (h *Handler) SetProjectMemberAdder(p ProjectMemberAdder) { h.projectMembers = p }
 
 // Routes registers the organization endpoints under the /api/v1 group.
+// The static /self-service segment precedes the /{id} param route (chi matches static first).
 func (h *Handler) Routes(r chi.Router) {
 	r.Get("/organizations", h.list)
+	r.Get("/organizations/self-service", h.selfService)
 	r.Post("/organizations", h.create)
 	r.Get("/organizations/{id}", h.get)
 	r.Put("/organizations/{id}", h.update)
@@ -65,6 +67,22 @@ func (h *Handler) principal(w http.ResponseWriter, r *http.Request) (*user.User,
 		return nil, false
 	}
 	return u, true
+}
+
+// selfService reports whether the caller may self-create an organization under the
+// platform org-provisioning quota — the client onboarding gates its create form on this
+// (limit 0 + enabled = operator-only mode, the form hides and shows a contact note).
+func (h *Handler) selfService(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	can, err := h.svc.CanCreateOrganization(r.Context(), u.Sub)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	httpx.OK(w, map[string]any{"canCreateOrganization": can})
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {

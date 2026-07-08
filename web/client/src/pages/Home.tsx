@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { useNavigate } from "react-router-dom"
-import { useMutation, useQueryClient } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import { apiFetch } from "@/lib/api"
 import { useProjects } from "@/lib/hooks"
@@ -31,6 +31,13 @@ function Onboarding() {
   const navigate = useNavigate()
   const qc = useQueryClient()
 
+  // Operator-only mode gate: when the platform org quota locks self-service creation
+  // (limit 0 + enabled), show a contact note instead of a form that would only 400.
+  const selfService = useQuery({
+    queryKey: ["org-self-service"],
+    queryFn: () => apiFetch<{ canCreateOrganization?: boolean }>("/organizations/self-service"),
+  })
+
   const create = useMutation({
     mutationFn: async () => {
       const org = await apiFetch<Organization>("/organizations", { method: "POST", body: { name: orgName } })
@@ -46,6 +53,26 @@ function Onboarding() {
     },
     onError: (e: Error) => toast.error(e.message),
   })
+
+  if (selfService.isLoading) {
+    return <div className="flex min-h-screen items-center justify-center text-muted-foreground">Loading…</div>
+  }
+  if (selfService.data && selfService.data.canCreateOrganization === false) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background px-6">
+        <Card className="w-full max-w-md">
+          <CardHeader>
+            <CardTitle className="font-display text-xl">Welcome to Stratos</CardTitle>
+            <CardDescription>
+              Your account isn't part of any project yet. Organizations on this platform are
+              created by the operator — please contact support or wait for a project invitation.
+            </CardDescription>
+            <div className="horizon mt-2" />
+          </CardHeader>
+        </Card>
+      </div>
+    )
+  }
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-6">

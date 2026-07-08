@@ -73,8 +73,18 @@ func New(log *slog.Logger, lookup auth.HmacKeyLookup, mainIssuer, adminIssuer, b
 			&sdk.StreamableHTTPOptions{Stateless: true, Logger: log})
 	}
 	h.clientH = mk("stratos", clientTools)
-	h.adminH = mk("stratos-admin", adminTools)
+	h.adminH = mk("stratos-admin", adminAllTools())
 	return h
+}
+
+// adminAllTools is the full admin toolset: the Admin-API rows plus the internal-admin
+// config surfaces (pricing, platform/provider config, project ops, billing ops).
+func adminAllTools() []toolDef {
+	out := []toolDef{}
+	for _, set := range [][]toolDef{adminTools, adminPricingTools, adminPlatformTools, adminProjectOpsTools, adminBillingOpsTools} {
+		out = append(out, set...)
+	}
+	return out
 }
 
 // SetRoot wires the full app router for in-process dispatch (set after the
@@ -159,10 +169,14 @@ func httpForbidden(w http.ResponseWriter) {
 
 type param struct {
 	name     string
-	typ      string // "string" | "integer" | "boolean" | "object"
+	typ      string // "string" | "integer" | "boolean" | "object" | "array"
 	desc     string
 	required bool
-	in       string // "path" | "query" | "body"
+	// in: "path" | "query" | "body" | "rawbody". "body" params are wrapped into one JSON
+	// object keyed by param name; a "rawbody" param is sent VERBATIM as the whole request
+	// body (for endpoints that decode a bare array or a passthrough document). A tool uses
+	// either named body params or a single rawbody param, never both.
+	in string
 }
 
 type toolDef struct {
@@ -225,6 +239,8 @@ func (h *Handler) dispatch(ctx context.Context, d toolDef, args map[string]any) 
 	path := d.path
 	q := url.Values{}
 	body := map[string]any{}
+	var rawBody any
+	hasRaw := false
 	for _, p := range d.params {
 		v, ok := args[p.name]
 		if !ok || v == nil {
@@ -240,6 +256,8 @@ func (h *Handler) dispatch(ctx context.Context, d toolDef, args map[string]any) 
 			q.Set(p.name, fmt.Sprintf("%v", v))
 		case "body":
 			body[p.name] = v
+		case "rawbody":
+			rawBody, hasRaw = v, true
 		}
 	}
 	if strings.Contains(path, "{") {
@@ -251,7 +269,10 @@ func (h *Handler) dispatch(ctx context.Context, d toolDef, args map[string]any) 
 	// unconditionally, and a hand-built request with a nil reader would give
 	// them r.Body == nil.
 	var rd io.Reader = http.NoBody
-	if len(body) > 0 {
+	if hasRaw {
+		payload, _ = json.Marshal(rawBody)
+		rd = bytes.NewReader(payload)
+	} else if len(body) > 0 {
 		payload, _ = json.Marshal(body)
 		rd = bytes.NewReader(payload)
 	}

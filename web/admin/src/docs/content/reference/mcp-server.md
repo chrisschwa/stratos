@@ -48,11 +48,29 @@ API-key principals always get the **admin toolset**. Treat the pair like any adm
 
 ## The admin toolset
 
-Read tools: `list_users`, `get_user`, `list_organizations`, `get_organization`, `list_org_members`, `list_projects`, `get_project`, `list_billing_profiles`, `get_billing_profile`, `list_bills`, `get_bill`, `list_account_credits`, `get_account_credit`, `list_service_providers`, `get_service_provider`.
+The core directory tools wrap the [Admin API](/docs/reference/overview):
 
-Write tools: `create_user`, `delete_user`, `create_organization`, `create_project`, `provision_project`, `activate_billing_profile`, `suspend_billing_profile`, `resume_billing_profile`, `create_account_credit`, `delete_account_credit`.
+- Reads: `list_users`, `get_user`, `list_organizations`, `get_organization`, `list_org_members`, `list_projects`, `get_project`, `list_billing_profiles`, `get_billing_profile`, `list_bills`, `get_bill`, `list_account_credits`, `get_account_credit`, `list_service_providers`, `get_service_provider`.
+- Writes: `create_user`, `delete_user`, `create_organization`, `create_project`, `provision_project`, `activate_billing_profile`, `suspend_billing_profile`, `resume_billing_profile`, `create_account_credit`, `delete_account_credit`.
 
-The semantics — status codes, pagination markers, error envelopes — line up exactly with the [Admin API reference](/docs/reference/overview); each tool is a thin wrapper over the matching endpoint.
+On top of those, the admin toolset exposes the platform's configuration surfaces (these wrap the internal admin REST routes — same permissions and audit trail as the admin console):
+
+| Area | Tools |
+|---|---|
+| Pricing | `list/get/create/update_price_plan`, `list/get/create/update/delete_price_plan_rule`, `get_price_plan_rule_usage`, `list_billing_resource_types`, `list_unpriced_flavors` |
+| Billing config | `get/create/update_billing_configuration`, `list_currencies` |
+| Platform config | `get/update_platform_configuration`, `set_platform_regions` |
+| Cloud providers | `list/get/update_cloud_provider`, `discover_cloud_provider`, `set_provider_default_quota`, `set_provider_features`, `set_gnocchi_granularity`, `get_gpu_capacity`, `list_live_flavors` |
+| Flavor categories | `list/get/create/update/delete_flavor_category` |
+| Project ops | `set_project_quota`, `set_project_public_networks`, `sync_project`, `get_project_resource_counts`, `list_project_cloud_resources`, `update_project`, `set_project_status`, `list_project_members_admin` |
+| Transactions | `list_account_credit_transactions`, `list_collect_transactions`, `list_billing_profile_transactions`, `refund_transaction`, `approve/reject_bank_transfer` |
+| Catalog & campaigns | savings plans, promotion codes, price-adjustment rules, taxes, custom menu, message templates (list/create/update/delete each) |
+| Integrations | `list/create/update/delete_integration` (secrets are write-only, never returned) |
+| Observability | `get_admin_stats`, `search_audit_log` |
+
+Update tools that replace a stored document wholesale (`update_platform_configuration`, `update_billing_configuration`, `set_provider_default_quota`, `set_provider_features`) say so in their descriptions — read first, merge, write back.
+
+Mutations by API-key principals are recorded in the audit log with the key id as the actor.
 
 ## Good to know
 

@@ -469,6 +469,12 @@ func (h *Handler) refundTransaction(w http.ResponseWriter, r *http.Request) {
 // ok=false → not an admin (→ 403).
 func (h *Handler) adminContext(r *http.Request) (role string, granted []string, ok bool) {
 	rc := httpx.RC(r.Context())
+	// A verified Admin-API hmac key (SigV4) is an operator credential: it already holds the
+	// whole /admin-api/v1 surface and the operator job triggers. Granting SUPER_ADMIN here
+	// lets the MCP admin toolset (Bearer pk.sk) drive the full admin surface too.
+	if rc.SigV4KeyID != "" {
+		return "SUPER_ADMIN", []string{"admin:*"}, true
+	}
 	if h.adminIssuer != "" {
 		// REMOTE_OIDC: admin issuer + admin client in azp → auto-provisioned SUPER_ADMIN.
 		if rc.Issuer != h.adminIssuer || (h.adminClientID != "" && rc.Azp != h.adminClientID) {

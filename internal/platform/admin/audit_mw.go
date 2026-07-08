@@ -36,7 +36,13 @@ func (h *Handler) auditMiddleware(next http.Handler) http.Handler {
 		if cap.status < 200 || cap.status >= 300 {
 			return // failures / 501 / 4xx → not audited (only SUCCESS is logged here)
 		}
-		ev := audit.AdminEvent(rc.Sub, rc.Sub)
+		// Actor: the OIDC subject, else the SigV4 key id (MCP api-key principals have no Sub —
+	// without this their mutations would audit with an empty actor).
+	actor := rc.Sub
+	if actor == "" {
+		actor = rc.SigV4KeyID
+	}
+	ev := audit.AdminEvent(actor, actor)
 		ev.EventContext = audit.ContextPlatform
 		ev.Action = methodToAction(r.Method)
 		ev.ResourceType = pathResourceType(r.URL.Path)

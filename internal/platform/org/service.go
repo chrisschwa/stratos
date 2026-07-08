@@ -55,6 +55,14 @@ func (s *Service) CreateOrganization(ctx context.Context, creator *user.User, na
 	return o, nil
 }
 
+// CanCreateOrganization reports whether the user may self-create another organization
+// under the platform org-provisioning quota — the read the client onboarding/UI gates on
+// (same check CreateOrganization enforces, so the form and the API can't disagree).
+func (s *Service) CanCreateOrganization(ctx context.Context, sub string) (bool, error) {
+	exceeded, err := s.isOrganizationsQuotaExceeded(ctx, sub)
+	return !exceeded, err
+}
+
 // isOrganizationsQuotaExceeded gates self-service org creation on the platform
 // default config's organizationProvisioningQuota: when enabled, a user may OWN
 // at most `limit` organizations (0 = self-service creation off — operators
