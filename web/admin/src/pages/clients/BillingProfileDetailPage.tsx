@@ -990,6 +990,9 @@ function PricePlansTab({ bpId, bp }: { bpId: string; bp: Summary }) {
   const planId = (p: Doc) => p.id ?? p._id
   const byId = new Map(plans.map((p) => [planId(p), p]))
   const unassigned = plans.filter((p) => !assigned.includes(planId(p)))
+  // Public plans apply to every profile (they're what an un-scoped profile bills under), so surface
+  // them read-only when included — otherwise the tab looks empty even though pricing is active.
+  const publicPlans = plans.filter((p) => (p.accessMode as string) === "PUBLIC" && p.enabled !== false)
 
   const savePlans = useMutation({
     mutationFn: (pricePlanIds: string[]) =>
@@ -1023,46 +1026,85 @@ function PricePlansTab({ bpId, bp }: { bpId: string; bp: Summary }) {
         <Skeleton className="h-40" />
       ) : plansQ.isError ? (
         <ErrorPanel error={plansQ.error} />
-      ) : !assigned.length ? (
-        <EmptyState
-          icon={Layers}
-          title="No scoped price plans"
-          hint="Assign a plan to scope this profile's pricing beyond the public plans."
-        />
       ) : (
-        <Card className="overflow-hidden py-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Plan</TableHead>
-                <TableHead>Name</TableHead>
-                <TableHead>Access</TableHead>
-                <TableHead>Enabled</TableHead>
-                <TableHead />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {assigned.map((pid) => {
-                const p = byId.get(pid)
-                return (
-                  <TableRow key={pid}>
-                    <TableCell className="font-mono text-xs">{pid}</TableCell>
-                    <TableCell className="text-sm">{p?.name ?? "(unknown plan)"}</TableCell>
-                    <TableCell className="text-sm text-muted-foreground">{p?.accessMode ?? "—"}</TableCell>
-                    <TableCell className="text-sm text-muted-foreground">
-                      {p ? (p.enabled ? "Yes" : "No") : "—"}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button variant="outline" size="sm" onClick={() => setRemoveId(pid)}>
-                        <Trash2 className="size-4" /> Remove
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                )
-              })}
-            </TableBody>
-          </Table>
-        </Card>
+        <div className="space-y-6">
+          {includePublic && publicPlans.length > 0 ? (
+            <div>
+              <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Included public plans (apply to every profile)
+              </p>
+              <Card className="overflow-hidden py-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Plan</TableHead>
+                      <TableHead>Name</TableHead>
+                      <TableHead>Access</TableHead>
+                      <TableHead>Enabled</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {publicPlans.map((p) => (
+                      <TableRow key={planId(p)}>
+                        <TableCell className="font-mono text-xs">{planId(p)}</TableCell>
+                        <TableCell className="text-sm">{p.name ?? "—"}</TableCell>
+                        <TableCell className="text-sm text-muted-foreground">{p.accessMode ?? "—"}</TableCell>
+                        <TableCell className="text-sm text-muted-foreground">{p.enabled ? "Yes" : "No"}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </Card>
+            </div>
+          ) : null}
+
+          <div>
+            <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Scoped plans (this profile only)
+            </p>
+            {!assigned.length ? (
+              <EmptyState
+                icon={Layers}
+                title="No scoped price plans"
+                hint="Assign a plan to scope this profile's pricing beyond the public plans."
+              />
+            ) : (
+              <Card className="overflow-hidden py-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Plan</TableHead>
+                      <TableHead>Name</TableHead>
+                      <TableHead>Access</TableHead>
+                      <TableHead>Enabled</TableHead>
+                      <TableHead />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {assigned.map((pid) => {
+                      const p = byId.get(pid)
+                      return (
+                        <TableRow key={pid}>
+                          <TableCell className="font-mono text-xs">{pid}</TableCell>
+                          <TableCell className="text-sm">{p?.name ?? "(unknown plan)"}</TableCell>
+                          <TableCell className="text-sm text-muted-foreground">{p?.accessMode ?? "—"}</TableCell>
+                          <TableCell className="text-sm text-muted-foreground">
+                            {p ? (p.enabled ? "Yes" : "No") : "—"}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <Button variant="outline" size="sm" onClick={() => setRemoveId(pid)}>
+                              <Trash2 className="size-4" /> Remove
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      )
+                    })}
+                  </TableBody>
+                </Table>
+              </Card>
+            )}
+          </div>
+        </div>
       )}
 
       <Dialog open={assignOpen} onOpenChange={setAssignOpen}>
