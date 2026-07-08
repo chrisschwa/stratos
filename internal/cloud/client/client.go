@@ -442,7 +442,12 @@ func (c *Client) ListServers(ctx context.Context) ([]Server, error) {
 			ImageID:  mapID(s.Image),
 			FlavorID: mapID(s.Flavor),
 		}
-		if srv.FlavorID != "" {
+		// nova ≥ mv2.47 embeds the flavor's specs directly in the server detail (original_name/
+		// ram/vcpus/disk, and extra_specs at mv2.61) with NO id — so mapID above is "" and the
+		// by-id resolution below never runs. Read the embedded specs first.
+		fillEmbeddedFlavor(&srv, s.Flavor)
+		// Fallback for older clouds that return only a bare flavor link {id,links}: resolve specs by id.
+		if srv.RAM == 0 && srv.VCPUs == 0 && srv.FlavorID != "" {
 			f := flavorCache[srv.FlavorID]
 			if f == nil {
 				if got, gerr := flavors.Get(ctx, cc, srv.FlavorID).Extract(); gerr == nil {
@@ -453,10 +458,10 @@ func (c *Client) ListServers(ctx context.Context) ([]Server, error) {
 			if f != nil {
 				srv.FlavorName, srv.RAM, srv.VCPUs, srv.Disk = f.Name, f.RAM, f.VCPUs, f.Disk
 				srv.FlavorExtraSpecs = f.ExtraSpecs
-				if srv.FlavorExtraSpecs == nil {
-					srv.FlavorExtraSpecs = map[string]string{}
-				}
 			}
+		}
+		if srv.FlavorExtraSpecs == nil {
+			srv.FlavorExtraSpecs = map[string]string{}
 		}
 		out = append(out, srv)
 	}
@@ -745,6 +750,43 @@ func (c *Client) ListServerActions(ctx context.Context, serverID string) ([]map[
 		return nil, err
 	}
 	return resp.InstanceActions, nil
+}
+
+// fillEmbeddedFlavor reads the flavor specs nova embeds in the server detail at microversion ≥ 2.47
+// (original_name/ram/vcpus/disk) plus extra_specs (≥ 2.61). No-op for a bare {id,links} flavor link
+// (older microversions), which is resolved by id instead. JSON numbers decode to float64.
+func fillEmbeddedFlavor(srv *Server, raw any) {
+	fl, ok := raw.(map[string]any)
+	if !ok {
+		return
+	}
+	if name, _ := fl["original_name"].(string); name != "" {
+		srv.FlavorName = name
+	}
+	srv.RAM = flavorInt(fl["ram"], srv.RAM)
+	srv.VCPUs = flavorInt(fl["vcpus"], srv.VCPUs)
+	srv.Disk = flavorInt(fl["disk"], srv.Disk)
+	if es, ok := fl["extra_specs"].(map[string]any); ok {
+		m := make(map[string]string, len(es))
+		for k, v := range es {
+			m[k], _ = v.(string)
+		}
+		srv.FlavorExtraSpecs = m
+	}
+}
+
+// flavorInt coerces a JSON number (float64) or Go int to int, else returns fallback.
+func flavorInt(v any, fallback int) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	default:
+		return fallback
+	}
 }
 
 // mapID extracts an "id" from a Nova embedded reference (Image/Flavor are JSON objects in
