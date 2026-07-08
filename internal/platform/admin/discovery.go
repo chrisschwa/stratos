@@ -93,7 +93,11 @@ func (h *Handler) discoverCatalog(ctx context.Context, esID string) (regions, se
 				svc = pgdoc.M{}
 				services[slug] = svc
 			}
-			svc[region] = true
+			// Discover every service, but leave key-manager (Barbican) DISABLED by
+			// default: listing secrets is policy-restricted on most clouds, so an
+			// enabled-by-default secret sync trips Barbican's secrets:get policy
+			// every cycle. The operator turns it on in the Services tab if wanted.
+			svc[region] = slug != "key-manager"
 		}
 	}
 	return regions, services, nil
