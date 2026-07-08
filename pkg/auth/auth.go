@@ -161,6 +161,12 @@ func (a *Authenticator) verifyJWT(r *http.Request, raw string) (*httpx.RequestCo
 	a.mu.RLock()
 	realms := a.realms
 	a.mu.RUnlock()
+	// The /mcp resource is accessed by OAuth clients that register THEMSELVES (dynamic
+	// client registration, or a dedicated MCP client), so their azp never matches the SPA
+	// clientId. Skip the azp binding there — the token is still fully validated (signature,
+	// issuer, expiry) and the MCP handler's issuer→toolset mapping is the real gate. Every
+	// other path keeps the SPA/API azp binding.
+	skipAzp := strings.HasPrefix(r.URL.Path, "/mcp")
 	for _, realm := range realms {
 		if realm.Verifier == nil {
 			continue
@@ -184,7 +190,7 @@ func (a *Authenticator) verifyJWT(r *http.Request, raw string) (*httpx.RequestCo
 		// clients) stays on the verifier; we bind azp here instead. Tokens that omit azp are
 		// allowed (Keycloak stamps azp on client tokens, so a cross-client token still carries a
 		// concrete, non-matching azp).
-		if !azpAllowed(realm.ClientID, claims.Azp) {
+		if !skipAzp && !azpAllowed(realm.ClientID, claims.Azp) {
 			continue
 		}
 		// Authenticate only — do NOT create the domain User here. The User is
