@@ -56,6 +56,7 @@ type Writer interface {
 	GetNetwork(ctx context.Context, id string) (map[string]any, error)
 	DeleteNetwork(ctx context.Context, id string) error
 	CreateSubnet(ctx context.Context, o client.CreateSubnetOpts) (map[string]any, error)
+	UpdateSubnet(ctx context.Context, id string, o client.UpdateSubnetOpts) (map[string]any, error)
 	DeleteSubnet(ctx context.Context, id string) error
 	CreateRouter(ctx context.Context, o client.CreateRouterOpts) (map[string]any, error)
 	AddRouterInterface(ctx context.Context, routerID, subnetID string) error
@@ -77,6 +78,7 @@ type Writer interface {
 	StopServer(ctx context.Context, id string) error
 	ResizeServer(ctx context.Context, id, flavorID string) error
 	ConfirmResize(ctx context.Context, id string) error
+	SetServerPassword(ctx context.Context, id, password string) error
 	RevertResize(ctx context.Context, id string) error
 	RenameServer(ctx context.Context, id, name string) (map[string]any, error)
 	CreateServerImage(ctx context.Context, id, name string) (string, error)
@@ -240,6 +242,30 @@ func (s *WriteService) Create(ctx context.Context, serviceID, region, projectID,
 		}
 		cr.ExternalID = netID
 		cr.Data = map[string]any{"network": net, "networkName": mstr(d, "name")}
+
+	case cloud.TypeSubnet:
+		// Add a subnet to an existing network. data{networkId, cidr, name?, enableDhcp?, gateway?,
+		// customGatewayIp?/gatewayIp?, dnsNameServers?, allocationPools?, hostRoutes?}.
+		if mstr(d, "networkId") == "" {
+			return nil, fmt.Errorf("networkId is required")
+		}
+		dhcp := mbool(d, "enableDhcp")
+		sub, err := s.w.CreateSubnet(ctx, client.CreateSubnetOpts{
+			NetworkID: mstr(d, "networkId"), Name: mstr(d, "name"),
+			CIDR: mstr(d, "cidr"), IPVersion: 4, EnableDHCP: &dhcp,
+			Gateway: mbool(d, "gateway"), CustomGatewayIP: mbool(d, "customGatewayIp"),
+			GatewayIP: mstr(d, "gatewayIp"), DNSNameservers: mstrs(d, "dnsNameServers"),
+			AllocationPools: allocationPools(d["allocationPools"]), HostRoutes: hostRoutes(d["hostRoutes"]),
+		})
+		if err != nil {
+			return nil, err
+		}
+		sid := mstr(sub, "id")
+		if sid == "" {
+			return nil, fmt.Errorf("create subnet: no id")
+		}
+		cr.ExternalID = sid
+		cr.Data = map[string]any{"subnet": sub}
 
 	case cloud.TypeRouter:
 		rt, err := s.w.CreateRouter(ctx, client.CreateRouterOpts{
@@ -815,6 +841,10 @@ func (s *WriteService) Action(ctx context.Context, serviceID, projectID, externa
 			return cr, s.w.ResizeServer(ctx, externalID, mstr(data, "flavorId"))
 		case "CONFIRMRESIZE":
 			return cr, s.w.ConfirmResize(ctx, externalID)
+		case "SET_PASSWORD":
+			// Reset the instance's admin/root password (nova changeAdminPassword). Needs the image's
+			// guest agent / cloud-init password support to take effect.
+			return cr, s.w.SetServerPassword(ctx, externalID, mstr(data, "password"))
 		case "REVERTRESIZE":
 			return cr, s.w.RevertResize(ctx, externalID)
 		case "RENAME":
@@ -912,6 +942,33 @@ func (s *WriteService) Action(ctx context.Context, serviceID, projectID, externa
 			cr.Data = map[string]any{"port": port}
 			return s.repo.Insert(ctx, cr)
 		}
+	case cloud.TypeSubnet:
+		// Subnet UPDATE: data{name?, enableDhcp?, gatewayIp?, dnsNameServers?}. gatewayIp present
+		// (even "") sets/clears the gateway; dnsNameServers present replaces the list.
+		if action == "UPDATE" {
+			opts := client.UpdateSubnetOpts{}
+			if v, ok := data["name"].(string); ok {
+				opts.Name = &v
+			}
+			if v, ok := data["enableDhcp"].(bool); ok {
+				opts.EnableDHCP = &v
+			}
+			if v, present := data["gatewayIp"]; present {
+				g, _ := v.(string)
+				opts.GatewayIP = &g
+			}
+			if _, present := data["dnsNameServers"]; present {
+				dns := strSlice(data["dnsNameServers"])
+				opts.DNSNameservers = &dns
+			}
+			sub, err := s.w.UpdateSubnet(ctx, externalID, opts)
+			if err != nil {
+				return nil, err
+			}
+			cr.Data = map[string]any{"subnet": sub}
+			return s.repo.Insert(ctx, cr)
+		}
+
 	case cloud.TypeSecurityGroup:
 		// Security-group actions: ADD_RULE / DELETE_RULE (LIST_RULES is a read-action handled
 		// in cloud_writes.go). After a rule change, re-fetch the group so data carries the new ruleset.
@@ -1026,6 +1083,8 @@ func (s *WriteService) Delete(ctx context.Context, serviceID, externalID string)
 	switch cr.Type {
 	case cloud.TypeNetwork:
 		err = s.w.DeleteNetwork(ctx, externalID)
+	case cloud.TypeSubnet:
+		err = s.w.DeleteSubnet(ctx, externalID)
 	case cloud.TypeRouter:
 		err = s.w.DeleteRouter(ctx, externalID)
 	case cloud.TypeServer, cloud.TypeBaremetalServer:

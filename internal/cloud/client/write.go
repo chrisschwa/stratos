@@ -164,6 +164,37 @@ func (c *Client) CreateSubnet(ctx context.Context, o CreateSubnetOpts) (map[stri
 	return toMap(s), nil
 }
 
+// UpdateSubnetOpts mirrors the mutable subnet fields. Nil pointers = field omitted; GatewayIP set to
+// a pointer-to-"" disables the gateway, a pointer-to-ip sets it.
+type UpdateSubnetOpts struct {
+	Name           *string
+	GatewayIP      *string
+	EnableDHCP     *bool
+	DNSNameservers *[]string
+	HostRoutes     *[]HostRoute
+}
+
+// UpdateSubnet updates a subnet (name/gateway/dhcp/dns/host-routes). Returns the updated subnet map.
+func (c *Client) UpdateSubnet(ctx context.Context, id string, o UpdateSubnetOpts) (map[string]any, error) {
+	nc, err := c.net()
+	if err != nil {
+		return nil, err
+	}
+	opts := subnets.UpdateOpts{Name: o.Name, GatewayIP: o.GatewayIP, EnableDHCP: o.EnableDHCP, DNSNameservers: o.DNSNameservers}
+	if o.HostRoutes != nil {
+		hr := make([]subnets.HostRoute, 0, len(*o.HostRoutes))
+		for _, h := range *o.HostRoutes {
+			hr = append(hr, subnets.HostRoute{DestinationCIDR: h.DestinationCIDR, NextHop: h.NextHop})
+		}
+		opts.HostRoutes = &hr
+	}
+	s, err := subnets.Update(ctx, nc, id, opts).Extract()
+	if err != nil {
+		return nil, err
+	}
+	return toMap(s), nil
+}
+
 // DeleteSubnet removes a subnet.
 func (c *Client) DeleteSubnet(ctx context.Context, id string) error {
 	nc, err := c.net()
