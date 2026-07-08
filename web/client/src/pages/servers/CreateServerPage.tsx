@@ -1,8 +1,8 @@
 // Create-server wizard: Location → Availability zone → Image → Flavor → Network → Public IP → Access → Name.
 // API contract verified against internal/cloud/providers/write.go (TypeServer branch):
 // data reads name / imageId / flavorId / networkInterfaces:[{uuid}] / availabilityZoneName /
-// keyName / securityGroupNames / assignFloatingIp / floatingNetworkId.
-// (No user-data / boot-volume keys in the Go create — not offered.)
+// keyName / adminPass / userData / securityGroupNames / assignFloatingIp / floatingNetworkId.
+// (No boot-volume keys in the Go create — not offered.)
 import { Fragment, useMemo, useState } from "react"
 import { Link, useNavigate } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
@@ -21,6 +21,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { StatusBadge } from "@/components/status-badge"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Textarea } from "@/components/ui/textarea"
 import { apiFetch, type CloudScope } from "@/lib/api"
 import {
   useFlavorCategories, useImageGroups, useLocations, useProject, useProjectId, usePublicNetworks,
@@ -162,6 +163,9 @@ export default function CreateServerPage() {
   const [assignFip, setAssignFip] = useState(true)
   const [fipNetId, setFipNetId] = useState<string>()
   const [keyName, setKeyName] = useState("") // "" = no key pair
+  const [loginMethod, setLoginMethod] = useState<"key" | "password">("key")
+  const [password, setPassword] = useState("")
+  const [userData, setUserData] = useState("")
   const [sgNames, setSgNames] = useState<string[]>([])
   const [name, setName] = useState("")
 
@@ -189,7 +193,9 @@ export default function CreateServerPage() {
             networkInterfaces: netIds.map((uuid) => ({ uuid })),
             assignFloatingIp: wantFip,
             ...(wantFip && netsVisible && fipNet ? { floatingNetworkId: fipNet } : {}),
-            ...(keyName ? { keyName } : {}),
+            ...(loginMethod === "key" && keyName ? { keyName } : {}),
+            ...(loginMethod === "password" && password ? { adminPass: password } : {}),
+            ...(userData.trim() ? { userData } : {}),
             ...(sgNames.length ? { securityGroupNames: sgNames } : {}),
           },
         },
@@ -448,34 +454,87 @@ export default function CreateServerPage() {
           <Step n={7} title="Access (optional)">
             <div className="grid gap-4">
               <div className="grid max-w-md gap-2">
-                <Label>SSH key pair</Label>
-                {keypairs.isLoading ? (
-                  <Skeleton className="h-9" />
-                ) : !keypairs.data?.length ? (
-                  <p className="text-sm text-muted-foreground">
-                    No key pairs in this project — create one under Compute → Key pairs first.
-                  </p>
-                ) : (
-                  <Select
-                    value={keyName || "__none__"}
-                    onValueChange={(v) => setKeyName(v === "__none__" ? "" : v)}
+                <Label>Login method</Label>
+                <div className="inline-flex w-fit overflow-hidden rounded-md border">
+                  <Button
+                    type="button"
+                    variant={loginMethod === "key" ? "default" : "ghost"}
+                    size="sm"
+                    className="rounded-none"
+                    onClick={() => setLoginMethod("key")}
                   >
-                    <SelectTrigger className="w-full">
-                      <SelectValue placeholder="No key pair" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none__">No key pair</SelectItem>
-                      {keypairs.data
-                        .filter((k) => !!keypairName(k))
-                        .map((k) => (
-                          <SelectItem key={k.id} value={keypairName(k)}>
-                            {keypairName(k)}
-                          </SelectItem>
-                        ))}
-                    </SelectContent>
-                  </Select>
+                    SSH key pair
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={loginMethod === "password" ? "default" : "ghost"}
+                    size="sm"
+                    className="rounded-none"
+                    onClick={() => setLoginMethod("password")}
+                  >
+                    Password
+                  </Button>
+                </div>
+                {loginMethod === "key" ? (
+                  keypairs.isLoading ? (
+                    <Skeleton className="h-9" />
+                  ) : !keypairs.data?.length ? (
+                    <p className="text-sm text-muted-foreground">
+                      No key pairs in this project — create one under Compute → Key pairs first.
+                    </p>
+                  ) : (
+                    <Select
+                      value={keyName || "__none__"}
+                      onValueChange={(v) => setKeyName(v === "__none__" ? "" : v)}
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue placeholder="No key pair" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__none__">No key pair</SelectItem>
+                        {keypairs.data
+                          .filter((k) => !!keypairName(k))
+                          .map((k) => (
+                            <SelectItem key={k.id} value={keypairName(k)}>
+                              {keypairName(k)}
+                            </SelectItem>
+                          ))}
+                      </SelectContent>
+                    </Select>
+                  )
+                ) : (
+                  <>
+                    <Input
+                      type="password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="Admin/root password"
+                      autoComplete="new-password"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Sets the instance's admin password. The login username depends on the image (e.g.{" "}
+                      <span className="font-mono">ubuntu</span>, <span className="font-mono">root</span>). Leave
+                      blank for a cloud-generated password. Requires the image to support password login.
+                    </p>
+                  </>
                 )}
               </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="user-data">User data (cloud-init, optional)</Label>
+                <Textarea
+                  id="user-data"
+                  value={userData}
+                  onChange={(e) => setUserData(e.target.value)}
+                  placeholder={"#cloud-config\n# runs on first boot"}
+                  rows={5}
+                  className="font-mono text-xs"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Passed to cloud-init on first boot — e.g. create users, install packages, run scripts.
+                </p>
+              </div>
+
               <div className="grid gap-2">
                 <Label>Security groups</Label>
                 {secgroups.isLoading ? (

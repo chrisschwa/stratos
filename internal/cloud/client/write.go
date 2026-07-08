@@ -271,6 +271,7 @@ type CreateServerOpts struct {
 	SecurityGroups   []string
 	UserData         []byte
 	AvailabilityZone string
+	AdminPass        string // sets the instance's admin/root password (nova adminPass); "" = nova-generated
 }
 
 // CreateServer boots a Nova server. Returns the created server object
@@ -292,11 +293,15 @@ func (c *Client) CreateServer(ctx context.Context, o CreateServerOpts) (map[stri
 		SecurityGroups:   o.SecurityGroups,
 		UserData:         o.UserData,
 		AvailabilityZone: o.AvailabilityZone,
+		AdminPass:        o.AdminPass,
 	}
-	// KeyName is a scheduler-hint-adjacent field carried via the keypairs ext; the base
-	// servers.CreateOpts in v2 accepts it through CreateOptsBuilder wrappers — omitted here
-	// (the smoke + first slice boot keyless); add the keypairs.CreateOptsExt when the API needs it.
-	s, err := servers.Create(ctx, cc, opts, nil).Extract()
+	// KeyName rides via the keypairs ext (the base servers.CreateOpts carries it only through a
+	// CreateOptsBuilder wrapper); keyless boots pass the base opts unchanged.
+	var builder servers.CreateOptsBuilder = opts
+	if o.KeyName != "" {
+		builder = keypairs.CreateOptsExt{CreateOptsBuilder: opts, KeyName: o.KeyName}
+	}
+	s, err := servers.Create(ctx, cc, builder, nil).Extract()
 	if err != nil {
 		return nil, err
 	}

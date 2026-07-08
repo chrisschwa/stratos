@@ -263,10 +263,17 @@ func (s *WriteService) Create(ctx context.Context, serviceID, region, projectID,
 		if az == "" {
 			az = mstr(d, "availabilityZone")
 		}
+		// Login + cloud-init: keyName OR adminPass (password login), plus optional raw user-data
+		// (cloud-init) the client can send for custom provisioning.
+		var userData []byte
+		if ud := mstr(d, "userData"); ud != "" {
+			userData = []byte(ud)
+		}
 		srv, err := s.w.CreateServer(ctx, client.CreateServerOpts{
 			Name: mstr(d, "name"), FlavorID: mstr(d, "flavorId"), ImageID: mstr(d, "imageId"),
 			NetworkIDs: netIDs, KeyName: mstr(d, "keyName"),
 			SecurityGroups: secGroups, AvailabilityZone: az,
+			AdminPass: mstr(d, "adminPass"), UserData: userData,
 		})
 		if err != nil {
 			return nil, err
