@@ -130,7 +130,9 @@ func (h *Handler) cloudResourceSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var prov providers.Provider
-	for _, p := range syncjob.ProvidersFor(cc, res.Region, res.ProjectID, extProjID) {
+	// nil enabled-gate: this targets ONE existing resource's type — if it exists in the
+	// cache, its service was on when it was created; re-gating here would only block refresh.
+	for _, p := range syncjob.ProvidersFor(cc, res.Region, res.ProjectID, extProjID, nil) {
 		if p.Type() == res.Type {
 			prov = p
 			break

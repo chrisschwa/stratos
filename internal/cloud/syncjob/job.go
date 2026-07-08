@@ -126,19 +126,21 @@ func (j *Job) syncProject(ctx context.Context, p *project.Project, esCache map[s
 // ProvidersFor is THE canonical per-project sync-provider set for a tenant-scoped client —
 // shared by the cron walk, the admin project sync and the admin single-resource sync so every
 // path reconciles with identical scoping/leak-guards.
-func ProvidersFor(cc *client.Client, region, projectID, extProjID string) []providers.Provider {
-	return []providers.Provider{
+//
+// enabled gates the OPTIONAL service types by the provider's Services-tab toggles
+// (config.services[slug][region]) — a disabled service is not listed at all, so e.g. a
+// cloud whose key-manager is off no longer gets a barbican policy-denial logged per project
+// per cycle. nil = everything on (single-resource sync targets an existing resource's type).
+// Core compute/network/volume/image types are never gated: they back billing accrual.
+func ProvidersFor(cc *client.Client, region, projectID, extProjID string, enabled func(slug string) bool) []providers.Provider {
+	if enabled == nil {
+		enabled = func(string) bool { return true }
+	}
+	ps := []providers.Provider{
 		providers.NewServerProvider(cc, region, projectID),
 		providers.NewPortProvider(cc, region, projectID),
 		providers.NewVolumeProvider(cc, region, projectID),
 		providers.NewFloatingIPProvider(cc, region, projectID),
-		providers.NewLoadBalancerProvider(cc, region, projectID),
-		// Token-scoped niche types (no cross-tenant leak — barbican/swift/designate scope to the
-		// project token). A service without these endpoints just errors the List (logged, non-fatal,
-		// no delete).
-		providers.NewBarbicanSecretProvider(cc, region, projectID),
-		providers.NewBucketProvider(cc, region, projectID),
-		providers.NewDNSZoneProvider(cc, region, projectID),
 		// neutron types: PROJECT-SCOPED (each List passes project_id + the mapper post-filters
 		// tenant_id == externalProjectId — two-layer leak guard;
 		// see providers/neutron_sync.go).
@@ -149,12 +151,31 @@ func ProvidersFor(cc *client.Client, region, projectID, extProjID string) []prov
 		// IMAGE: owner-filtered (glance list also returns other tenants' public/shared images —
 		// the dev125/187 leak class; the image sync passes owner=externalProjectId).
 		providers.NewImageSyncProvider(cc, region, projectID, extProjID),
-		// Token-scoped (cinder/nova/heat/manila — no cross-tenant leak).
+		// Token-scoped (cinder/nova — no cross-tenant leak).
 		providers.NewVolumeSnapshotProvider(cc, region, projectID),
 		providers.NewServerGroupProvider(cc, region, projectID),
-		providers.NewStackProvider(cc, region, projectID),
-		providers.NewShareProvider(cc, region, projectID),
 	}
+	// Optional service types (token-scoped, no cross-tenant leak) — only when the service is
+	// enabled for this provider+region.
+	if enabled("load-balancer") {
+		ps = append(ps, providers.NewLoadBalancerProvider(cc, region, projectID))
+	}
+	if enabled("key-manager") {
+		ps = append(ps, providers.NewBarbicanSecretProvider(cc, region, projectID))
+	}
+	if enabled("object-store") {
+		ps = append(ps, providers.NewBucketProvider(cc, region, projectID))
+	}
+	if enabled("dns") {
+		ps = append(ps, providers.NewDNSZoneProvider(cc, region, projectID))
+	}
+	if enabled("orchestration") {
+		ps = append(ps, providers.NewStackProvider(cc, region, projectID))
+	}
+	if enabled("sharev2") {
+		ps = append(ps, providers.NewShareProvider(cc, region, projectID))
+	}
+	return ps
 }
 
 func (j *Job) syncService(ctx context.Context, p *project.Project, es *externalservice.ExternalService) int {
@@ -172,7 +193,8 @@ func (j *Job) syncService(ctx context.Context, p *project.Project, es *externals
 			continue
 		}
 		now := j.now()
-		for _, prov := range ProvidersFor(cc, region, p.ID, extProjID) {
+		enabled := func(slug string) bool { return es.ServiceEnabledInRegion(slug, region) }
+		for _, prov := range ProvidersFor(cc, region, p.ID, extProjID, enabled) {
 			st, err := providers.Reconcile(ctx, prov, j.cloud, es.ID, now)
 			if err != nil {
 				j.log.Error("syncjob: reconcile", "project", p.ID, "serviceId", es.ID, "region", region, "type", prov.Type(), "err", err)

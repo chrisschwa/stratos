@@ -97,6 +97,20 @@ func (e *ExternalService) RegionNames() []string {
 	return out
 }
 
+// ServiceEnabledInRegion reports whether config.services[slug][region] is toggled on —
+// the same admin Services-tab map the client menu gates on. A provider with NO services
+// map at all says yes to everything (legacy docs predate the map; sync everything rather
+// than nothing).
+func (e *ExternalService) ServiceEnabledInRegion(slug, region string) bool {
+	svcs, ok := e.Config["services"].(map[string]any)
+	if !ok || len(svcs) == 0 {
+		return true
+	}
+	regions, _ := svcs[slug].(map[string]any)
+	b, _ := regions[region].(bool)
+	return b
+}
+
 func (e *ExternalService) auth() map[string]any {
 	m, _ := e.Config["auth"].(map[string]any)
 	return m
