@@ -1,6 +1,6 @@
 import { NavLink, Outlet, useNavigate, useParams } from "react-router-dom"
 import {
-  BookOpen, Boxes, Camera, ChevronsUpDown, CreditCard, Database, FileClock, Globe, HardDrive,
+  BarChart3, BookOpen, Boxes, Camera, ChevronsUpDown, CreditCard, Database, FileClock, Globe, HardDrive,
   Image, KeyRound, Layers, LayoutDashboard, Lock, LogOut, Moon, Network, Receipt,
   ExternalLink, Gift, PiggyBank, Route as RouteIcon, Search as SearchIcon, Server, Settings, Share2, Shield, Sun, UserCircle, Users, Wallet, Waypoints, Zap,
 } from "lucide-react"
@@ -83,6 +83,7 @@ function navGroups(pid: string): Group[] {
     {
       label: "Organization",
       items: [
+        { to: `${p}/org/billing`, label: "Billing", icon: BarChart3 },
         { to: `${p}/org/members`, label: "Members", icon: Users },
         { to: `${p}/org/projects`, label: "Projects", icon: Boxes },
         { to: `${p}/org/audit`, label: "Audit log", icon: FileClock },

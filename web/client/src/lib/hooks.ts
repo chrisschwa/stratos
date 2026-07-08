@@ -80,6 +80,21 @@ export function useCostInfo(pid: string) {
   })
 }
 
+// Org-wide billing overview (profile aggregate + per-project breakdown) for the org billing
+// dashboard. `bp` = the org's billing-profile id (from useBillingSummary().id).
+export type OrgCostInfo = {
+  billingProfileCostInfo?: CostInfo
+  projects?: Record<string, CostInfo>
+  currency?: string
+}
+export function useOrgCostInfo(bp?: string) {
+  return useQuery({
+    queryKey: ["org-cost-info", bp],
+    queryFn: () => apiFetch<OrgCostInfo>(`/bill/${bp}/cost-info`),
+    enabled: !!bp,
+  })
+}
+
 export function useBillingSummary(pid: string) {
   return useQuery({
     queryKey: ["billing-summary", pid],

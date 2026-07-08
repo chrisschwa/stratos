@@ -58,6 +58,9 @@ func (h *BillingHandler) Routes(r chi.Router) {
 	// DTO mapping deferred — see billing.Repo.listRaw).
 	r.Get("/bill/gateways", h.billInvoiceGateways) // static — chi prefers it over {billingProfileId}
 	r.Get("/bill/{billingProfileId}", h.bills)
+	// Org billing dashboard: profile aggregate + per-project breakdown (static "cost-info"
+	// wins over the {billId} sibling at this node).
+	r.Get("/bill/{billingProfileId}/cost-info", h.orgCostInfo)
 	r.Get("/bill/{billingProfileId}/{billId}", h.billByID) // single bill detail
 	// Client bill statement PDF (the "download" static
 	// segment wins over the {billId} param sibling).
@@ -152,6 +155,32 @@ func (h *BillingHandler) requireBillingProfileRead(w http.ResponseWriter, r *htt
 		return nil, false
 	}
 	return bp, true
+}
+
+// orgCostInfo handles GET /bill/{billingProfileId}/cost-info: the org-wide billing overview for the
+// org billing dashboard — the profile aggregate plus a per-project breakdown ({projectId: CostInfo},
+// only projects that have billed items). Reuses the same cost breakdown as the project dashboard,
+// so category/top-resource logic stays single-sourced. BILLING_PROFILE_READ gated.
+func (h *BillingHandler) orgCostInfo(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	bp, ok := h.requireBillingProfileRead(w, r, u, chi.URLParam(r, "billingProfileId"))
+	if !ok {
+		return
+	}
+	now := time.Now().UTC()
+	bills, err := h.billing.BillsByBillingProfile(r.Context(), bp.ID)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	httpx.OK(w, map[string]any{
+		"billingProfileCostInfo": billing.CostInfoMap(billing.BillCostBreakdown(bills, now, nil)),
+		"projects":               billing.ProjectCostInfoMap(bills, now, nil),
+		"currency":               bp.Currency,
+	})
 }
 
 // resolveProfileByMembership resolves a

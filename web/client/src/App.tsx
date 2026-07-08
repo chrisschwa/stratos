@@ -93,6 +93,7 @@ export default function App() {
           <Route path="more/:slug" element={lazyPage(() => import("@/pages/MorePage"))} />
 
           {/* Organization */}
+          <Route path="org/billing" element={lazyPage(() => import("@/pages/org/OrgBillingPage"))} />
           <Route path="org/members" element={lazyPage(() => import("@/pages/org/MembersPage"))} />
           <Route path="org/projects" element={lazyPage(() => import("@/pages/org/ProjectsPage"))} />
           <Route path="org/audit" element={lazyPage(() => import("@/pages/org/AuditPage"))} />
