@@ -9,6 +9,9 @@ export type Project = {
   billingProfileId?: string
   memberships?: Array<{ sub?: string; roles?: string[] }>
   services?: Array<{ serviceId?: string; config?: Record<string, unknown> }>
+  // false/absent = the client gets no external-network picker (the server auto-picks the pool for
+  // floating IPs / router gateways); true = the client chooses.
+  publicNetworksVisible?: boolean
 }
 
 export type Organization = {

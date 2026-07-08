@@ -439,5 +439,7 @@ func toView(p *Project) ProjectView {
 		Memberships:      p.Memberships,
 		CreatedAt:        p.CreatedAt,
 		ResourcesCount:   []ResourceCount{},
+
+		PublicNetworksVisible: p.PublicNetworksVisible,
 	}
 }

@@ -44,6 +44,8 @@ type ProjectDoc = {
   services?: Array<{ serviceId?: string; externalProjectId?: string }>
   // absent/null = all external networks allowed; array = allow-list of Neutron network ids.
   publicNetworkIds?: string[] | null
+  // false/absent = the client can't choose an external network (server auto-picks); true = client picks.
+  publicNetworksVisible?: boolean
   // Admin-managed per-project quota; gpu = {model alias (or "*") → device limit}.
   quota?: { gpu?: Record<string, number> }
   createdAt?: string
@@ -157,10 +159,12 @@ export default function ProjectDetailPage() {
   )
   const [allPublicNets, setAllPublicNets] = useState(true)
   const [publicNetChoice, setPublicNetChoice] = useState<string[]>([])
+  const [publicNetsVisible, setPublicNetsVisible] = useState(false)
   useEffect(() => {
     setAllPublicNets(!project?.publicNetworkIds)
     setPublicNetChoice(project?.publicNetworkIds ?? [])
-  }, [project?.publicNetworkIds])
+    setPublicNetsVisible(project?.publicNetworksVisible === true)
+  }, [project?.publicNetworkIds, project?.publicNetworksVisible])
 
   const enabled = (project?.status ?? "").toUpperCase() === "ENABLED"
 
@@ -338,7 +342,10 @@ export default function ProjectDetailPage() {
     mutationFn: () =>
       apiFetch(`${projectPath}/public-networks`, {
         method: "PUT",
-        body: { publicNetworkIds: allPublicNets ? null : publicNetChoice },
+        body: {
+          publicNetworkIds: allPublicNets ? null : publicNetChoice,
+          publicNetworksVisible: publicNetsVisible,
+        },
       }),
     onSuccess: () => {
       toast.success("Public networks updated")
@@ -488,6 +495,19 @@ export default function ProjectDetailPage() {
                   <p className="text-sm text-muted-foreground">No cloud service attached.</p>
                 ) : (
                   <div className="space-y-4">
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        id="public-nets-visible"
+                        checked={publicNetsVisible}
+                        onCheckedChange={setPublicNetsVisible}
+                      />
+                      <label htmlFor="public-nets-visible" className="text-sm">
+                        Let users pick the external network
+                        <span className="ml-1 text-xs text-muted-foreground">
+                          (off = the server auto-assigns it)
+                        </span>
+                      </label>
+                    </div>
                     <div className="flex items-center gap-2">
                       <Switch id="all-public-networks" checked={allPublicNets} onCheckedChange={setAllPublicNets} />
                       <label htmlFor="all-public-networks" className="text-sm">

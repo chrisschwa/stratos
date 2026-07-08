@@ -547,6 +547,9 @@ func (h *Handler) projectSetPublicNetworks(w http.ResponseWriter, r *http.Reques
 	id := chi.URLParam(r, "id")
 	var req struct {
 		PublicNetworkIds *[]string `json:"publicNetworkIds"` // pointer: null/absent ≠ empty array
+		// PublicNetworksVisible: pointer so absent leaves the flag untouched. false = the client
+		// gets no external-network picker and the server auto-selects one; true = the client picks.
+		PublicNetworksVisible *bool `json:"publicNetworksVisible"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
@@ -557,14 +560,22 @@ func (h *Handler) projectSetPublicNetworks(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	before := maps.Clone(existing)
+	set := pgdoc.M{}
+	if req.PublicNetworksVisible != nil {
+		set["publicNetworksVisible"] = *req.PublicNetworksVisible
+	}
 	if req.PublicNetworkIds == nil {
-		if _, err := h.repo.SetAndUnsetFields(r.Context(), projectCollection, id, nil,
+		var sf pgdoc.M
+		if len(set) > 0 {
+			sf = set
+		}
+		if _, err := h.repo.SetAndUnsetFields(r.Context(), projectCollection, id, sf,
 			pgdoc.M{"publicNetworkIds": nil}); httpx.WriteError(w, err) {
 			return
 		}
 	} else {
-		if _, err := h.repo.SetFields(r.Context(), projectCollection, id,
-			pgdoc.M{"publicNetworkIds": *req.PublicNetworkIds}); httpx.WriteError(w, err) {
+		set["publicNetworkIds"] = *req.PublicNetworkIds
+		if _, err := h.repo.SetFields(r.Context(), projectCollection, id, set); httpx.WriteError(w, err) {
 			return
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"strings"
 	"time"
@@ -590,17 +591,44 @@ func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 		if fnet == "" {
 			fnet = strAny(req.Data["networkId"])
 		}
+		// Hidden pool: no user-picked network → auto-select an allowed one (prefer the router's
+		// external network so the IP is routable) and hand it to the write path.
+		if fnet == "" && !proj.PublicNetworksVisible {
+			if fnet = h.autoPickExternalNetwork(r.Context(), proj, svcID, true); fnet != "" {
+				req.Data["networkId"] = fnet
+			}
+		}
 		if fnet != "" && !publicNetworkAllowed(proj, fnet) {
 			h.fail(w, httpx.BadRequest("External network is not enabled for this project"))
 			return
 		}
 	case cloud.TypeRouter:
-		if ext := strAny(req.Data["externalNetworkId"]); ext != "" && !publicNetworkAllowed(proj, ext) {
+		ext := strAny(req.Data["externalNetworkId"])
+		if ext == "" && !proj.PublicNetworksVisible {
+			// Picker hidden → the UI promised an auto-assigned gateway, so a missing pool is an
+			// error, not a silently gateway-less router (unlike the visible case, where an empty
+			// external network is a valid "no gateway" choice).
+			if ext = h.autoPickExternalNetwork(r.Context(), proj, svcID, false); ext == "" {
+				h.fail(w, httpx.BadRequest("No external network is available to attach to this router"))
+				return
+			}
+			req.Data["externalNetworkId"] = ext
+		}
+		if ext != "" && !publicNetworkAllowed(proj, ext) {
 			h.fail(w, httpx.BadRequest("External network is not enabled for this project"))
 			return
 		}
 	case cloud.TypeServer, cloud.TypeBaremetalServer:
+		// Curated-but-all-disabled zones: the AZ list is empty, so the client would submit no
+		// availabilityZoneName and let the cloud pick a disabled default — block instead.
+		if en, curated := hasEnabledZone(h.zoneConfig(r.Context(), svcID)); curated && !en {
+			h.fail(w, httpx.BadRequest("No availability zone is enabled for this project"))
+			return
+		}
 		if assignFIP {
+			if fipNetID == "" && !proj.PublicNetworksVisible {
+				fipNetID = h.autoPickExternalNetwork(r.Context(), proj, svcID, true)
+			}
 			if fipNetID == "" {
 				h.fail(w, httpx.BadRequest("floatingNetworkId is required when assignFloatingIp is set"))
 				return
@@ -781,7 +809,7 @@ func (h *Handler) cloudBulkAction(w http.ResponseWriter, r *http.Request) {
 			}
 		case "LIST_AVAILABILITY_ZONES":
 			if azs, err := cc.ListAvailabilityZones(r.Context()); err == nil {
-				result = azs
+				result = applyZoneConfig(azs, h.zoneConfig(r.Context(), svcID))
 			}
 		case "LIST_FLAVORS":
 			// the create-server Hardware table — live nova flavors (LIST_FLAVORS →
@@ -826,6 +854,170 @@ func (h *Handler) cloudBulkAction(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	httpx.OK(w, map[string]any{"result": result})
+}
+
+// autoPickExternalNetwork selects one external network for a project whose external-network picker
+// is hidden (publicNetworksVisible=false). It respects the admin allow-list, and — for floating IPs
+// — prefers the network a router already egresses through so the IP is routable. Returns "" when no
+// allowed external network exists (the caller then fails the create as it would for a missing pool).
+func (h *Handler) autoPickExternalNetwork(ctx context.Context, proj *Project, svcID string, preferRouterMatch bool) string {
+	cc, ok := h.tryTenantClient(ctx, proj, svcID)
+	if !ok {
+		return ""
+	}
+	nets, err := cc.ListExternalNetworks(ctx)
+	if err != nil {
+		return ""
+	}
+	routerNet := ""
+	if preferRouterMatch {
+		routerNet = routerExternalNetwork(ctx, cc)
+	}
+	return chooseExternalNetwork(filterPublicNetworks(proj, nets), routerNet)
+}
+
+// chooseExternalNetwork picks one network from the allowed set: the router's network if it is in the
+// set (so a floating IP lands on the same external network the router egresses through), else the
+// sole network, else a random one. "" when the set is empty.
+func chooseExternalNetwork(allowed []client.Network, routerNet string) string {
+	if len(allowed) == 0 {
+		return ""
+	}
+	if routerNet != "" {
+		for _, n := range allowed {
+			if n.ID == routerNet {
+				return n.ID
+			}
+		}
+	}
+	if len(allowed) == 1 {
+		return allowed[0].ID
+	}
+	return allowed[rand.IntN(len(allowed))].ID
+}
+
+// routerExternalNetwork returns the external-gateway network id of any router in the project (the
+// network its traffic already egresses through), or "" when no router has an external gateway.
+func routerExternalNetwork(ctx context.Context, cc *client.Client) string {
+	routers, err := cc.ListRoutersFull(ctx)
+	if err != nil {
+		return ""
+	}
+	return firstRouterExternalNet(routers)
+}
+
+// firstRouterExternalNet reads the first non-empty external_gateway_info.network_id across the given
+// raw Neutron routers.
+func firstRouterExternalNet(routers []map[string]any) string {
+	for _, r := range routers {
+		gw, _ := r["external_gateway_info"].(map[string]any)
+		if gw == nil {
+			continue
+		}
+		if nid, _ := gw["network_id"].(string); nid != "" {
+			return nid
+		}
+	}
+	return ""
+}
+
+// zoneConfig loads the external service's admin-managed availability-zone config
+// (config.availabilityZones, a list of {name, displayName, enabled}), or nil when the service or
+// config is absent. Non-fatal: a missing service just means no zone curation.
+func (h *Handler) zoneConfig(ctx context.Context, svcID string) any {
+	if svcID == "" {
+		return nil
+	}
+	es, err := h.esSvc.Get(ctx, svcID)
+	if err != nil || es == nil {
+		return nil
+	}
+	return es.Config["availabilityZones"]
+}
+
+type zoneCfg struct {
+	display string
+	enabled bool
+}
+
+// zoneConfigByName normalizes the stored availability-zone config into name→config. The admin tab
+// persists a list [{name,displayName,enabled}] but also accepts a legacy name-keyed map
+// {name:{displayName,enabled}}, so both shapes are honored. Returns nil when no config is present,
+// letting callers tell an uncurated provider apart from one whose zones are all disabled.
+func zoneConfigByName(cfg any) map[string]zoneCfg {
+	entry := func(m map[string]any) zoneCfg {
+		disp, _ := m["displayName"].(string)
+		en, _ := m["enabled"].(bool)
+		return zoneCfg{display: disp, enabled: en}
+	}
+	switch v := cfg.(type) {
+	case []any:
+		if len(v) == 0 {
+			return nil
+		}
+		out := make(map[string]zoneCfg, len(v))
+		for _, e := range v {
+			m, _ := e.(map[string]any)
+			if name, _ := m["name"].(string); name != "" {
+				out[name] = entry(m)
+			}
+		}
+		return out
+	case map[string]any:
+		if len(v) == 0 {
+			return nil
+		}
+		out := make(map[string]zoneCfg, len(v))
+		for name, e := range v {
+			if m, _ := e.(map[string]any); name != "" {
+				out[name] = entry(m)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// hasEnabledZone reports whether the admin curated the availability zones (curated) and, if so,
+// whether at least one is enabled. curated=true && enabled=false is the "all zones disabled" state.
+func hasEnabledZone(cfg any) (enabled, curated bool) {
+	byName := zoneConfigByName(cfg)
+	if byName == nil {
+		return false, false
+	}
+	for _, c := range byName {
+		if c.enabled {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+// applyZoneConfig merges the admin zone config onto the live cloud zones: zones the admin
+// disabled are dropped, and each surviving zone carries its configured displayName (via the added
+// `displayName` field) while keeping `name` as the real zone name the create call needs. When no
+// config is present every zone passes through unchanged, so an uncurated provider still offers all
+// its zones.
+func applyZoneConfig(azs []map[string]any, cfg any) []map[string]any {
+	byName := zoneConfigByName(cfg)
+	if byName == nil {
+		return azs
+	}
+	out := make([]map[string]any, 0, len(azs))
+	for _, az := range azs {
+		name, _ := az["name"].(string)
+		c, known := byName[name]
+		if known && !c.enabled {
+			continue // admin disabled this zone → not offered to users
+		}
+		if known && c.display != "" {
+			az["displayName"] = c.display
+		} else {
+			az["displayName"] = name
+		}
+		out = append(out, az)
+	}
+	return out
 }
 
 // imageIsPrivate reports whether a glance image map (from ListImagesFull) has visibility==private —
@@ -1301,7 +1493,7 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 		azs := []map[string]any{}
 		if cc, ok := h.tryTenantClient(r.Context(), proj, svcID); ok {
 			if list, err := cc.ListVolumeAvailabilityZones(r.Context()); err == nil {
-				azs = list
+				azs = applyZoneConfig(list, h.zoneConfig(r.Context(), svcID))
 			}
 		}
 		httpx.OK(w, map[string]any{"result": azs})

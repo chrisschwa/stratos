@@ -18,7 +18,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { apiFetch } from "@/lib/api"
-import { useCloudList, useCloudScope, useProjectId, usePublicNetworks } from "@/lib/hooks"
+import { useCloudList, useCloudScope, useProject, useProjectId, usePublicNetworks } from "@/lib/hooks"
 import type { CloudResource } from "@/lib/types"
 
 function fipAddress(r: CloudResource): string {
@@ -42,6 +42,8 @@ export default function FloatingIPsPage() {
   const [assignPort, setAssignPort] = useState("")
 
   const externalNets = usePublicNetworks(pid, scope).data ?? []
+  // publicNetworksVisible=false → hide the pool picker; the server auto-picks the external network.
+  const netsVisible = useProject(pid).project?.publicNetworksVisible === true
 
   const invalidate = () => void qc.invalidateQueries({ queryKey: ["cloud", pid, "FLOATING_IP"] })
 
@@ -50,7 +52,8 @@ export default function FloatingIPsPage() {
       apiFetch(`/project/${pid}/cloud`, {
         method: "POST",
         cloud: scope,
-        body: { type: "FLOATING_IP", data: { networkId: netManual || netSelect } },
+        // Hidden picker → no networkId; the server auto-selects the pool.
+        body: { type: "FLOATING_IP", data: netsVisible ? { networkId: netManual || netSelect } : {} },
       }),
     onSuccess: () => {
       toast.success("Floating IP allocated")
@@ -180,46 +183,59 @@ export default function FloatingIPsPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Allocate floating IP</DialogTitle>
-            <DialogDescription>Pick the external network pool to allocate from.</DialogDescription>
+            <DialogDescription>
+              {netsVisible ? "Pick the external network pool to allocate from." : "Allocate a public IP address."}
+            </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 py-2">
-            <div className="grid gap-2">
-              <Label>External network</Label>
-              <Select value={netSelect} onValueChange={setNetSelect}>
-                <SelectTrigger>
-                  <SelectValue
-                    placeholder={
-                      externalNets.length
-                        ? "Select an external network"
-                        : "No public networks are enabled for this project"
-                    }
+            {netsVisible ? (
+              <>
+                <div className="grid gap-2">
+                  <Label>External network</Label>
+                  <Select value={netSelect} onValueChange={setNetSelect}>
+                    <SelectTrigger>
+                      <SelectValue
+                        placeholder={
+                          externalNets.length
+                            ? "Select an external network"
+                            : "No public networks are enabled for this project"
+                        }
+                      />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {externalNets.map((n) => (
+                        <SelectItem key={n.id} value={n.id}>
+                          {n.name || n.id}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="fip-net">Or enter a network ID manually</Label>
+                  <Input
+                    id="fip-net"
+                    className="font-mono"
+                    value={netManual}
+                    onChange={(e) => setNetManual(e.target.value)}
+                    placeholder="network UUID"
                   />
-                </SelectTrigger>
-                <SelectContent>
-                  {externalNets.map((n) => (
-                    <SelectItem key={n.id} value={n.id}>
-                      {n.name || n.id}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="fip-net">Or enter a network ID manually</Label>
-              <Input
-                id="fip-net"
-                className="font-mono"
-                value={netManual}
-                onChange={(e) => setNetManual(e.target.value)}
-                placeholder="network UUID"
-              />
-            </div>
+                </div>
+              </>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                A public network will be chosen automatically for this address.
+              </p>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={() => create.mutate()} disabled={(!netSelect && !netManual) || create.isPending}>
+            <Button
+              onClick={() => create.mutate()}
+              disabled={(netsVisible && !netSelect && !netManual) || create.isPending}
+            >
               {create.isPending ? "Allocating…" : "Allocate floating IP"}
             </Button>
           </DialogFooter>

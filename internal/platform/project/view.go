@@ -24,6 +24,9 @@ type ProjectView struct {
 	Memberships      []Membership    `json:"memberships"`
 	CreatedAt        *time.Time      `json:"createdAt,omitempty"`
 	ResourcesCount   []ResourceCount `json:"resourcesCount,omitempty"`
+	// PublicNetworksVisible mirrors the project flag so the client UI knows whether to show the
+	// external-network picker (true) or leave it to the server's auto-pick (false/default).
+	PublicNetworksVisible bool `json:"publicNetworksVisible"`
 }
 
 // MarshalJSON omits null fields: null billingProfileId is OMITTED, but the
@@ -44,12 +47,14 @@ func (v ProjectView) MarshalJSON() ([]byte, error) {
 		Status           string          `json:"status"`
 		BillingProfileID string          `json:"billingProfileId,omitempty"`
 		OrganizationID   string          `json:"organizationId"`
-		Memberships      []Membership    `json:"memberships"`
-		CreatedAt        *time.Time      `json:"createdAt,omitempty"`
-		ResourcesCount   []ResourceCount `json:"resourcesCount"`
+		Memberships           []Membership    `json:"memberships"`
+		CreatedAt             *time.Time      `json:"createdAt,omitempty"`
+		ResourcesCount        []ResourceCount `json:"resourcesCount"`
+		PublicNetworksVisible bool            `json:"publicNetworksVisible"`
 	}{
 		ID: v.ID, Name: v.Name, Status: v.Status, BillingProfileID: v.BillingProfileID,
 		OrganizationID: v.OrganizationID, Memberships: ms, CreatedAt: v.CreatedAt, ResourcesCount: rc,
+		PublicNetworksVisible: v.PublicNetworksVisible,
 	})
 }
 

@@ -23,7 +23,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { apiFetch } from "@/lib/api"
 import { timeAgo } from "@/lib/format"
-import { useCloudList, useCloudScope, useProjectId } from "@/lib/hooks"
+import { useCloudList, useCloudScope, useProject, useProjectId } from "@/lib/hooks"
 import type { CloudResource } from "@/lib/types"
 import { networkName } from "./NetworksPage"
 
@@ -40,6 +40,8 @@ export default function RoutersPage() {
   const pid = useProjectId()
   const scope = useCloudScope(pid)
   const qc = useQueryClient()
+  // publicNetworksVisible=false → hide the gateway picker; the server auto-picks the external network.
+  const netsVisible = useProject(pid).project?.publicNetworksVisible === true
   const { data, isLoading, refetch, isFetching, error } = useCloudList(pid, "ROUTER")
   const { data: networks } = useCloudList(pid, "NETWORK")
   const { data: ports } = useCloudList(pid, "PORT")
@@ -222,25 +224,31 @@ export default function RoutersPage() {
               <Label htmlFor="router-name">Name</Label>
               <Input id="router-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-router" />
             </div>
-            <div className="grid gap-2">
-              <Label>External network (optional)</Label>
-              <Select value={extNet} onValueChange={setExtNet}>
-                <SelectTrigger>
-                  <SelectValue placeholder="None" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={NONE}>None</SelectItem>
-                  {externalNets.map((n) => {
-                    const ext = n.externalId ?? (n.data?.network?.id as string) ?? n.id
-                    return (
-                      <SelectItem key={n.id} value={ext}>
-                        {networkName(n)}
-                      </SelectItem>
-                    )
-                  })}
-                </SelectContent>
-              </Select>
-            </div>
+            {netsVisible ? (
+              <div className="grid gap-2">
+                <Label>External network (optional)</Label>
+                <Select value={extNet} onValueChange={setExtNet}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="None" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NONE}>None</SelectItem>
+                    {externalNets.map((n) => {
+                      const ext = n.externalId ?? (n.data?.network?.id as string) ?? n.id
+                      return (
+                        <SelectItem key={n.id} value={ext}>
+                          {networkName(n)}
+                        </SelectItem>
+                      )
+                    })}
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                An external gateway will be assigned automatically.
+              </p>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)}>

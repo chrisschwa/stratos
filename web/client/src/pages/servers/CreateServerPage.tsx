@@ -22,10 +22,10 @@ import { StatusBadge } from "@/components/status-badge"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { apiFetch, type CloudScope } from "@/lib/api"
-import { useLocations, useProjectId, usePublicNetworks } from "@/lib/hooks"
+import { useLocations, useProject, useProjectId, usePublicNetworks } from "@/lib/hooks"
 import type { CloudResource, Location } from "@/lib/types"
 
-type Az = { name?: string; available?: boolean }
+type Az = { name?: string; displayName?: string; available?: boolean }
 type GlanceImage = Record<string, any>
 type Flavor = {
   externalId?: string
@@ -86,6 +86,8 @@ export default function CreateServerPage() {
     enabled: !!pid && !!scope,
   })
   const pubNets = usePublicNetworks(pid, scope)
+  // publicNetworksVisible=false → hide the pool picker; the server auto-assigns the floating IP.
+  const netsVisible = useProject(pid).project?.publicNetworksVisible === true
 
   const [azName, setAzName] = useState<string>()
   const [imageId, setImageId] = useState<string>()
@@ -102,7 +104,9 @@ export default function CreateServerPage() {
 
   const az = azName ?? (azs.data?.[0]?.name as string | undefined)
   const fipNet = fipNetId ?? pubNets.data?.[0]?.id
-  const wantFip = assignFip && !!pubNets.data?.length
+  // When the picker is hidden the server auto-picks, so a FIP can be assigned even with no listed
+  // pool; when visible we still need at least one network to pick from.
+  const wantFip = assignFip && (netsVisible ? !!pubNets.data?.length : true)
 
   const create = useMutation({
     mutationFn: () =>
@@ -118,7 +122,7 @@ export default function CreateServerPage() {
             ...(az ? { availabilityZoneName: az } : {}),
             networkInterfaces: netIds.map((uuid) => ({ uuid })),
             assignFloatingIp: wantFip,
-            ...(wantFip && fipNet ? { floatingNetworkId: fipNet } : {}),
+            ...(wantFip && netsVisible && fipNet ? { floatingNetworkId: fipNet } : {}),
             ...(keyName ? { keyName } : {}),
             ...(sgNames.length ? { securityGroupNames: sgNames } : {}),
           },
@@ -133,7 +137,8 @@ export default function CreateServerPage() {
   })
 
   const ready =
-    !!scope && !!imageId && !!flavorId && netIds.length > 0 && !!name.trim() && (!wantFip || !!fipNet)
+    !!scope && !!imageId && !!flavorId && netIds.length > 0 && !!name.trim() &&
+    (!wantFip || !netsVisible || !!fipNet)
 
   if (locations.isLoading) {
     return (
@@ -198,7 +203,7 @@ export default function CreateServerPage() {
                     onClick={() => setAzName(z.name)}
                   >
                     {az === z.name ? <Check className="size-4" /> : null}
-                    {z.name}
+                    {z.displayName || z.name}
                   </Button>
                 ))}
               </div>
@@ -326,12 +331,18 @@ export default function CreateServerPage() {
                   <Switch
                     id="assign-fip"
                     checked={wantFip}
-                    disabled={!pubNets.data?.length}
+                    disabled={netsVisible && !pubNets.data?.length}
                     onCheckedChange={setAssignFip}
                   />
                   <Label htmlFor="assign-fip">Assign floating IP</Label>
                 </div>
-                {!pubNets.data?.length ? (
+                {!netsVisible ? (
+                  wantFip ? (
+                    <p className="text-sm text-muted-foreground">
+                      A public IP will be assigned automatically shortly after the server becomes active.
+                    </p>
+                  ) : null
+                ) : !pubNets.data?.length ? (
                   <p className="text-sm text-muted-foreground">
                     No public networks are enabled for this project.
                   </p>

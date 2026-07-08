@@ -48,6 +48,11 @@ type Project struct {
 	// router:external networks allowed (the default); non-nil = only these Neutron network ids
 	// (empty = none).
 	PublicNetworkIds []string `json:"publicNetworkIds,omitempty"`
+	// PublicNetworksVisible controls whether the client may CHOOSE the external network for a
+	// floating IP / router gateway. false (the default, incl. absent) = the client sees no picker
+	// and the server auto-selects an allowed external network on the user's behalf; true = the
+	// client picks explicitly.
+	PublicNetworksVisible bool `json:"publicNetworksVisible"`
 	// Quota is the admin-managed per-project quota config (stored JSON; enforced at the
 	// Stratos cloud gate, never pushed to OpenStack). Shape: {"gpu": {"<model>": n, "*": n}}.
 	Quota                  map[string]any `json:"quota,omitempty"`
@@ -85,6 +90,7 @@ func (p Project) MarshalJSON() ([]byte, error) {
 		CustomInfo             map[string]any `json:"customInfo"`
 		Services               []any          `json:"services"`
 		PublicNetworkIds       []string       `json:"publicNetworkIds,omitempty"`
+		PublicNetworksVisible  bool           `json:"publicNetworksVisible"`
 		Quota                  map[string]any `json:"quota,omitempty"`
 		ScheduledForDeletionAt *time.Time     `json:"scheduledForDeletionAt,omitempty"`
 		CreatedAt              *time.Time     `json:"createdAt,omitempty"`
@@ -92,7 +98,8 @@ func (p Project) MarshalJSON() ([]byte, error) {
 	}{
 		ID: p.ID, Name: p.Name, Status: p.Status, Data: p.Data, Owner: p.Owner,
 		Memberships: ms, OrganizationID: p.OrganizationID, BillingProfileID: p.BillingProfileID,
-		CustomInfo: ci, Services: svc, PublicNetworkIds: p.PublicNetworkIds, Quota: p.Quota,
+		CustomInfo: ci, Services: svc, PublicNetworkIds: p.PublicNetworkIds,
+		PublicNetworksVisible: p.PublicNetworksVisible, Quota: p.Quota,
 		ScheduledForDeletionAt: p.ScheduledForDeletionAt,
 		CreatedAt:              p.CreatedAt, UpdatedAt: p.UpdatedAt,
 	})
