@@ -3,7 +3,7 @@ package notification
 import (
 	"context"
 	"crypto/subtle"
-	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -89,8 +89,13 @@ func (h *Handler) receive(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	var msg OsloMessage
-	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MiB cap
+	if err != nil {
+		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
+		return
+	}
+	msg, err := ParseOsloBody(body)
+	if err != nil {
 		// A malformed body is the one case we 400 (request-body decode failure).
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
 		return

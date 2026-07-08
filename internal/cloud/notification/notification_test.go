@@ -148,3 +148,25 @@ func TestMinimalInfo(t *testing.T) {
 		t.Errorf("missing id: got %+v", got)
 	}
 }
+
+func TestParseOsloBody_UnwrapsEnvelope(t *testing.T) {
+	// oslo.messaging AMQP envelope: the real notification is a JSON string under oslo.message.
+	wrapped := []byte(`{"oslo.version":"2.0","oslo.message":"{\"event_type\":\"compute.instance.update\",\"payload\":{\"instance_id\":\"srv-1\",\"tenant_id\":\"proj-1\"}}"}`)
+	msg, err := ParseOsloBody(wrapped)
+	if err != nil {
+		t.Fatalf("wrapped: %v", err)
+	}
+	if msg.EventType != "compute.instance.update" {
+		t.Fatalf("event_type = %q, want compute.instance.update", msg.EventType)
+	}
+	if msg.Payload["instance_id"] != "srv-1" || msg.Payload["tenant_id"] != "proj-1" {
+		t.Errorf("payload not unwrapped: %#v", msg.Payload)
+	}
+
+	// A bare (already-unwrapped) notification still parses directly.
+	bare := []byte(`{"event_type":"volume.delete.end","payload":{"volume_id":"v-1"}}`)
+	m2, err := ParseOsloBody(bare)
+	if err != nil || m2.EventType != "volume.delete.end" {
+		t.Fatalf("bare: %v msg=%#v", err, m2)
+	}
+}

@@ -11,6 +11,7 @@ package notification
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"time"
@@ -27,6 +28,28 @@ type OsloMessage struct {
 	Priority    string         `json:"priority"`
 	Timestamp   *time.Time     `json:"timestamp"`
 	Payload     map[string]any `json:"payload"`
+}
+
+// ParseOsloBody decodes an os-notification request body into an OsloMessage, unwrapping the
+// oslo.messaging AMQP envelope that ceilometer/nova publish to RabbitMQ:
+//
+//	{"oslo.version": "2.0", "oslo.message": "<the notification JSON, as a string>"}
+//
+// The actual event_type/payload live inside that inner string, so a bridge that forwards the raw
+// broker body must be unwrapped here or every event decodes to an empty (→ skipped) message. A body
+// that is already the bare notification (no oslo.message) is parsed directly.
+func ParseOsloBody(body []byte) (OsloMessage, error) {
+	var env struct {
+		OsloMessage string `json:"oslo.message"`
+	}
+	if err := json.Unmarshal(body, &env); err == nil && env.OsloMessage != "" {
+		body = []byte(env.OsloMessage)
+	}
+	var msg OsloMessage
+	if err := json.Unmarshal(body, &msg); err != nil {
+		return OsloMessage{}, err
+	}
+	return msg, nil
 }
 
 // ResourceFetcher re-reads the live OpenStack object for a resource, admin-scoped + sudo to
