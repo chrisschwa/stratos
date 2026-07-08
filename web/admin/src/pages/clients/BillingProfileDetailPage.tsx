@@ -1588,7 +1588,7 @@ function ValidationTab({ bpId, bp }: { bpId: string; bp: Summary }) {
       <section>
         <h3 className="mb-2 font-medium">Verifications</h3>
         {!verifications.length ? (
-          <EmptyState icon={ShieldCheck} title="No verifications" hint="KYC verification entries appear here." />
+          <EmptyState icon={ShieldCheck} title="No verifications" hint="Verification entries appear here." />
         ) : (
           <Card className="overflow-hidden py-0">
             <Table>

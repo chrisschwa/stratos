@@ -84,7 +84,6 @@ type Form = {
   defaultConfiguration: boolean
   // activation
   autoActivationEnabled: boolean
-  kyc: string
   paymentMethod: string
   paymentMethodCard: string
   paymentMethodDeposit: string
@@ -124,7 +123,6 @@ function formFromDoc(cfg: BillingConfig): Form {
     invoiceGatewayId: cfg.invoiceGatewayId ?? "",
     defaultConfiguration: cfg.defaultConfiguration === true,
     autoActivationEnabled: flow.autoActivationEnabled === true,
-    kyc: flow.kyc ?? "DISABLED",
     paymentMethod: flow.paymentMethod ?? "DISABLED",
     paymentMethodCard: flow.paymentMethodCard ?? "DISABLED",
     paymentMethodDeposit: flow.paymentMethodDeposit ?? "DISABLED",
@@ -219,7 +217,6 @@ function buildBody(cfg: BillingConfig, form: Form, initial: Form): Record<string
     cfg.autoActivationFlow ||
     dirty(
       "autoActivationEnabled",
-      "kyc",
       "paymentMethod",
       "paymentMethodCard",
       "paymentMethodDeposit",
@@ -227,10 +224,10 @@ function buildBody(cfg: BillingConfig, form: Form, initial: Form): Record<string
       "minimumDepositAmount",
     )
   ) {
+    // kyc is not surfaced (no KYC integration ships) — the spread keeps any stored value.
     body.autoActivationFlow = {
       ...(cfg.autoActivationFlow ?? {}),
       autoActivationEnabled: form.autoActivationEnabled,
-      kyc: form.kyc,
       paymentMethod: form.paymentMethod,
       paymentMethodCard: form.paymentMethodCard,
       paymentMethodDeposit: form.paymentMethodDeposit,
@@ -485,9 +482,6 @@ export default function BillingConfigurationPage() {
                 </div>
 
                 <div className="grid gap-4 md:grid-cols-2">
-                  <Field label="KYC">
-                    <ConstraintSelect value={form.kyc} onChange={(v) => set({ kyc: v })} />
-                  </Field>
                   <Field label="Payment method">
                     <ConstraintSelect value={form.paymentMethod} onChange={(v) => set({ paymentMethod: v })} />
                   </Field>
