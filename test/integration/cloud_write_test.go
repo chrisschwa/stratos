@@ -57,6 +57,14 @@ func (f *fakeWriter) CreateServer(_ context.Context, o client.CreateServerOpts) 
 	f.created = append(f.created, "server:"+o.Name)
 	return map[string]any{"id": "srv-1", "name": o.Name, "flavor": map[string]any{"id": o.FlavorID}}, nil
 }
+func (f *fakeWriter) GetServer(_ context.Context, id string) (map[string]any, error) {
+	// Create re-reads the server for the fuller object; echo an id + a BUILD status.
+	return map[string]any{"id": id, "name": "srv-1", "status": "BUILD"}, nil
+}
+func (f *fakeWriter) SetServerPassword(_ context.Context, id, password string) error { return nil }
+func (f *fakeWriter) UpdateSubnet(_ context.Context, id string, o client.UpdateSubnetOpts) (map[string]any, error) {
+	return map[string]any{"id": id}, nil
+}
 func (f *fakeWriter) DeleteServer(_ context.Context, id string) error {
 	f.deleted = append(f.deleted, "server:"+id)
 	return nil
