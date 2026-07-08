@@ -235,8 +235,9 @@ function AddCardDialog({
     try {
       const res = await stripe.confirmCardSetup(setup.clientSecret, { payment_method: { card } })
       if (res.error) throw new Error(res.error.message ?? "Card confirmation failed")
-      // Finalize server-side (whitelisted callback; it 302s to the UI root — fetch raw, ignore body).
-      await apiFetch(`/callbacks/payment/stripe/card/confirm/${setup.txnId}`, { raw: true })
+      // Finalize server-side (whitelisted callback: retrieves the SetupIntent + stores the card,
+      // returns 200; throws here if the server couldn't finalize).
+      await apiFetch(`/callbacks/payment/stripe/card/confirm/${setup.txnId}`)
       toast.success("Card added")
       onAdded()
       onOpenChange(false)

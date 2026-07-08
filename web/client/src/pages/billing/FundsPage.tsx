@@ -293,8 +293,9 @@ function NewCardDepositDialog({
     try {
       const res = await stripe.confirmCardPayment(intent.clientSecret, { payment_method: { card } })
       if (res.error) throw new Error(res.error.message ?? "Payment confirmation failed")
-      // Finalize server-side (whitelisted callback; it 302s to the UI — fetch raw, ignore body).
-      await apiFetch(`/callbacks/payment/stripe/funds/confirm/${intent.txnId}`, { raw: true })
+      // Finalize server-side (whitelisted callback: retrieves the PaymentIntent + mints the
+      // account credit, returns 200; throws here if the server couldn't finalize).
+      await apiFetch(`/callbacks/payment/stripe/funds/confirm/${intent.txnId}`)
       toast.success(`Deposit of ${fmtMoney(amount, currency)} succeeded`)
       onDone()
       onOpenChange(false)

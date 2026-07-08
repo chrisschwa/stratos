@@ -586,18 +586,16 @@ func (h *BillingHandler) depositByCard(w http.ResponseWriter, r *http.Request) {
 // redirect target Stripe sends the browser back to. Finalizes the transaction (retrieve the
 // PaymentIntent → credit on success) then 302-redirects to the UI (never errors to the user —
 // failures still redirect to the UI base URL).
+// stripeFundsConfirm finalizes a deposit: the client fetches it (cross-origin, api host)
+// after confirming the PaymentIntent in-page, so it returns 200 — a redirect to the UI base
+// would be followed cross-origin by fetch and fail CORS ("Failed to fetch").
 func (h *BillingHandler) stripeFundsConfirm(w http.ResponseWriter, r *http.Request) {
 	txnID := chi.URLParam(r, "transactionId")
 	if _, err := h.addFunds.ProcessAddFunds(r.Context(), txnID); err != nil {
-		// log-and-redirect (any error still redirects to the UI base URL).
-		http.Redirect(w, r, h.uiBaseURL, http.StatusFound)
+		fail(w, err)
 		return
 	}
-	dest := h.uiBaseURL
-	if dest == "" {
-		dest = "/"
-	}
-	http.Redirect(w, r, dest, http.StatusFound)
+	httpx.Empty(w)
 }
 
 // addCard registers a card (SetupIntent) → client secret.
@@ -643,17 +641,16 @@ func (h *BillingHandler) listCards(w http.ResponseWriter, r *http.Request) {
 
 // stripeCardConfirm is the whitelisted redirect
 // target finalizing card registration (retrieve SetupIntent → store card) then 302 to the UI.
+// stripeCardConfirm finalizes an add-card (retrieves the SetupIntent, stores the card): the
+// client fetches it cross-origin after the in-page SetupIntent confirmation, so it returns 200
+// (a redirect to the UI base would be followed by fetch cross-origin and fail CORS).
 func (h *BillingHandler) stripeCardConfirm(w http.ResponseWriter, r *http.Request) {
 	txnID := chi.URLParam(r, "transactionId")
 	if _, err := h.registerCard.ProcessRegisterCard(r.Context(), txnID); err != nil {
-		http.Redirect(w, r, h.uiBaseURL, http.StatusFound)
+		fail(w, err)
 		return
 	}
-	dest := h.uiBaseURL
-	if dest == "" {
-		dest = "/"
-	}
-	http.Redirect(w, r, dest, http.StatusFound)
+	httpx.Empty(w)
 }
 
 // deleteCard finds the card by
