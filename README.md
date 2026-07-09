@@ -2,6 +2,27 @@
 
 **Multi-tenant cloud billing and self-service portal for OpenStack.**
 
+<p align="center">
+  <img alt="GitHub commit activity" src="https://img.shields.io/github/commit-activity/m/menlocloud/stratos"/>
+  <img alt="GitHub last commit" src="https://img.shields.io/github/last-commit/menlocloud/stratos"/>
+  <img alt="GitHub contributors" src="https://img.shields.io/github/contributors/menlocloud/stratos"/>
+  <img alt="GitHub closed issues" src="https://img.shields.io/github/issues-closed/menlocloud/stratos"/>
+  <img alt="License: AGPL v3" src="https://img.shields.io/github/license/menlocloud/stratos"/>
+</p>
+
+<p align="center">
+  <a href="https://github.com/menlocloud/stratos/actions/workflows/test.yml"><img alt="test" src="https://github.com/menlocloud/stratos/actions/workflows/test.yml/badge.svg?branch=main"/></a>
+  <a href="https://github.com/menlocloud/stratos/actions/workflows/docker.yml"><img alt="docker" src="https://github.com/menlocloud/stratos/actions/workflows/docker.yml/badge.svg?branch=main"/></a>
+  <a href="https://github.com/menlocloud/stratos/actions/workflows/helm.yml"><img alt="helm" src="https://github.com/menlocloud/stratos/actions/workflows/helm.yml/badge.svg?branch=main"/></a>
+</p>
+
+<p align="center">
+  <a href="#quickstart">Getting Started</a>
+  · <a href="https://github.com/menlocloud/stratos/discussions">Community</a>
+  · <a href="CHANGELOG.md">Changelog</a>
+  · <a href="https://github.com/menlocloud/stratos/issues">Bug reports</a>
+</p>
+
 Stratos turns an OpenStack cloud into a product: customers sign up, launch and
 manage compute / storage / network resources from a web console, and are billed
 for what they use. Operators configure regions, pricing, invoicing, and
@@ -159,3 +180,13 @@ and our [Code of Conduct](CODE_OF_CONDUCT.md). To report a security issue, see
 
 Stratos is licensed under the **GNU Affero General Public License v3.0**
 (AGPL-3.0-only). See [`LICENSE`](LICENSE).
+
+## Star History
+
+<a href="https://star-history.com/#menlocloud/stratos&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=menlocloud/stratos&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=menlocloud/stratos&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=menlocloud/stratos&type=Date" width="600" />
+  </picture>
+</a>
