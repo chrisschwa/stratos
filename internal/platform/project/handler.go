@@ -91,6 +91,7 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Put("/project/{id}/organization", h.updateOrganization)
 	r.Get("/project/{id}/members", h.getMembers)
 	r.Post("/project/{id}/members", h.addUserToProject)
+	r.Put("/project/{id}/members/{sub}/role", h.updateProjectMemberRole)
 	r.Delete("/project/{id}/members", h.removeUserFromProject)
 	r.Get("/project/{id}/billing", h.billingSummary)
 	// POST /{id}/billing/{billingProfileId} → swap the project's billing profile
@@ -537,6 +538,27 @@ func (h *Handler) removeUserFromProject(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	p, err := h.svc.RemoveMember(r.Context(), proj.ID, r.URL.Query().Get("sub"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	httpx.OK(w, *p)
+}
+
+func (h *Handler) updateProjectMemberRole(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	proj, ok := h.project(w, r, u, rbac.ProjectManageMembers)
+	if !ok {
+		return
+	}
+	var req struct {
+		Role string `json:"role"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	p, err := h.svc.UpdateMemberRole(r.Context(), proj.ID, chi.URLParam(r, "sub"), req.Role)
 	if err != nil {
 		h.fail(w, err)
 		return

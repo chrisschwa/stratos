@@ -130,16 +130,32 @@ func (s *Service) isProjectsQuotaExceeded(ctx context.Context, billingProfileID,
 // Save persists a project (status/services updates from cloud bootstrap).
 func (s *Service) Save(ctx context.Context, p *Project) error { return s.repo.Save(ctx, p) }
 
-// GetProject loads a project the user is a member of, else 404.
+// GetProject loads a project the user can access: either an explicit member, or an
+// OWNER/ADMIN of the owning organization (the same visibility ListForSub grants, and
+// which the RBAC project:* on those roles already authorizes). Else 404.
 func (s *Service) GetProject(ctx context.Context, sub, id string) (*Project, error) {
-	p, err := s.repo.FindForMember(ctx, id, sub)
+	p, err := s.repo.FindByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if p == nil {
+	if p == nil || (!p.IsMember(sub) && !s.orgAdminOrOwner(ctx, sub, p.OrganizationID)) {
 		return nil, httpx.NotFound(fmt.Sprintf("The project with id %s was not found. ", id))
 	}
 	return p, nil
+}
+
+// orgAdminOrOwner reports whether sub is an OWNER/ADMIN of the org, who can reach every
+// project in it — parity with visibleOrgIDs (the project list already shows them these).
+func (s *Service) orgAdminOrOwner(ctx context.Context, sub, orgID string) bool {
+	if orgID == "" {
+		return false
+	}
+	m, err := s.orgRepo.FindMember(ctx, orgID, sub)
+	if err != nil || m == nil {
+		return false
+	}
+	r := m.Role()
+	return r == "OWNER" || r == "ADMIN"
 }
 
 // GetProjectByID loads a project by id regardless of membership, else 404.
@@ -367,6 +383,42 @@ func (s *Service) RemoveMember(ctx context.Context, projID, sub string) (*Projec
 		return nil, httpx.BadRequest("Project owner cannot be removed from project")
 	}
 	p.Memberships = append(p.Memberships[:idx], p.Memberships[idx+1:]...)
+	if err := s.repo.Save(ctx, p); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// UpdateMemberRole changes an existing project member's role. Project roles are only
+// OWNER (treated as project ADMIN by RBAC) or MEMBER; it refuses an unknown role and
+// won't demote the project's last remaining OWNER.
+func (s *Service) UpdateMemberRole(ctx context.Context, projID, sub, role string) (*Project, error) {
+	if role != RoleOwner && role != RoleMember {
+		return nil, httpx.BadRequest("Role must be OWNER or MEMBER")
+	}
+	p, err := s.GetProjectByID(ctx, projID)
+	if err != nil {
+		return nil, err
+	}
+	idx, owners := -1, 0
+	for i, m := range p.Memberships {
+		if m.Role == RoleOwner {
+			owners++
+		}
+		if m.Sub == sub {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		return nil, httpx.NotFound("User is not a member of this project")
+	}
+	if p.Memberships[idx].Role == role {
+		return p, nil
+	}
+	if p.Memberships[idx].Role == RoleOwner && owners <= 1 {
+		return nil, httpx.BadRequest("Project must keep at least one owner")
+	}
+	p.Memberships[idx].Role = role
 	if err := s.repo.Save(ctx, p); err != nil {
 		return nil, err
 	}

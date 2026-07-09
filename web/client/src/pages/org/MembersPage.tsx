@@ -148,6 +148,20 @@ export default function MembersPage() {
     onError: (e: Error) => toast.error(e.message),
   })
 
+  const changeProjectRole = useMutation({
+    // PUT /project/{id}/members/{sub}/role {role} — OWNER (project admin) or MEMBER.
+    mutationFn: ({ sub, role }: { sub: string; role: string }) =>
+      apiFetch(`/project/${pid}/members/${encodeURIComponent(sub)}/role`, { method: "PUT", body: { role } }),
+    onSuccess: () => {
+      toast.success("Project role updated")
+      invalidateProject()
+    },
+    onError: (e: Error) => {
+      toast.error(e.message)
+      invalidateProject() // reset the select to the server value
+    },
+  })
+
   const removeProjectMember = useMutation({
     // DELETE /project/{id}/members?sub=… (sub passed as a query param).
     mutationFn: (sub: string) =>
@@ -280,7 +294,21 @@ export default function MembersPage() {
                   <TableRow key={m.sub}>
                     <TableCell className="font-medium">{memberName(m)}</TableCell>
                     <TableCell>{m.email ?? "—"}</TableCell>
-                    <TableCell className="text-sm">{m.role ?? "—"}</TableCell>
+                    <TableCell>
+                      <Select
+                        value={m.role ?? ""}
+                        onValueChange={(role) => changeProjectRole.mutate({ sub: m.sub, role })}
+                        disabled={changeProjectRole.isPending}
+                      >
+                        <SelectTrigger className="h-8 w-32" size="sm">
+                          <SelectValue placeholder="Set role" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="MEMBER">MEMBER</SelectItem>
+                          <SelectItem value="OWNER">OWNER</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </TableCell>
                     <TableCell className="text-right">
                       <Button variant="ghost" size="sm" onClick={() => setPmRemoving(m)}>
                         <Trash2 className="size-4" /> Remove
