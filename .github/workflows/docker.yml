@@ -5,7 +5,13 @@ name: docker
 #   push a git tag -> that tag name (e.g. v1.2.3)
 #   pull request   -> build only, no push
 #
-# Auth is the built-in GITHUB_TOKEN (packages: write) — no external secrets.
+# On a `v*` tag, once all four images are built the `release` job creates the
+# matching GitHub Release (the chart is published in parallel by helm.yml). Its
+# notes are the CHANGELOG.md section for that version (if present) followed by
+# GitHub's auto-generated commit list.
+#
+# Auth is the built-in GITHUB_TOKEN (packages: write / contents: write) — no
+# external secrets.
 on:
   push:
     branches:
@@ -75,3 +81,53 @@ jobs:
           build-args: ${{ matrix.build-args }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ---- tag v*: create the GitHub Release once every image is built -----------
+  # Runs only for a tag push and only after all four `build` matrix legs succeed,
+  # so a release never appears before its images exist.
+  release:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the release
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Assemble release notes from CHANGELOG
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"          # v0.3.26 -> 0.3.26
+          # Pull the "## [<version>] …" section out of CHANGELOG.md (empty if absent).
+          # Literal index() matching avoids awk's bracket-regex escaping pitfalls; the
+          # section ends at the next "## " header or the trailing "[link]:" definitions.
+          awk -v ver="$version" '
+            index($0, "## [" ver "]") == 1 { flag=1; next }
+            flag && (index($0, "## ") == 1 || index($0, "[") == 1) { flag=0 }
+            flag { print }
+          ' CHANGELOG.md > /tmp/notes.md || true
+          if [ -s /tmp/notes.md ]; then
+            echo "using the CHANGELOG.md section for $version as the release body"
+          else
+            echo "no CHANGELOG.md section for $version — notes will be auto-generated only"
+            : > /tmp/notes.md
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists — nothing to do."
+            exit 0
+          fi
+          # The CHANGELOG body (if any) is pre-pended to GitHub's auto-generated
+          # commit/PR notes (--generate-notes).
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Stratos $GITHUB_REF_NAME" \
+            --notes-file /tmp/notes.md \
+            --generate-notes \
+            --verify-tag \
+            --latest
