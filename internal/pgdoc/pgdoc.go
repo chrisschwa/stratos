@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -23,6 +24,9 @@ import (
 // DB wraps the PostgreSQL connection pool.
 type DB struct {
 	Pool *pgxpool.Pool
+	// tableOnce guards per-table Ensure calls so concurrent 42P01 hits don't
+	// race to CREATE TABLE and corrupt the pg_type catalog.
+	tableOnce sync.Map
 }
 
 // Connect dials PostgreSQL using the configured DSN.

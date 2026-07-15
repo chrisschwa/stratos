@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -25,11 +26,34 @@ func (s *Store) ident() string {
 }
 
 // Ensure creates the table if missing (documents appear on first write, like
-// the previous datastore's implicit collections).
+// the previous datastore's implicit collections).  Serialised per-table so
+// concurrent 42P01 hits don't race to CREATE TABLE and corrupt the pg_type
+// catalog.  A 23505 (duplicate-key) during creation is treated as success
+// — another goroutine beat us to it.
 func (s *Store) Ensure(ctx context.Context) error {
+	val, _ := s.db.tableOnce.LoadOrStore(s.table, &tableEnsure{})
+	t := val.(*tableEnsure)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.done {
+		return t.err
+	}
 	_, err := s.db.q(ctx).Exec(ctx,
 		"CREATE TABLE IF NOT EXISTS "+s.ident()+" (id text PRIMARY KEY, doc jsonb NOT NULL)")
-	return err
+	if err != nil && !IsDup(err) {
+		t.done = true
+		t.err = err
+		return err
+	}
+	t.done = true
+	return nil
+}
+
+// tableEnsure is a per-table guard that serialises CREATE TABLE calls.
+type tableEnsure struct {
+	mu   sync.Mutex
+	done bool
+	err  error
 }
 
 // undefined-table (42P01) → auto-create + retry once, mirroring implicit
@@ -299,7 +323,7 @@ func (s *Store) DeleteOne(ctx context.Context, filter M) (bool, error) {
 // --- reads ---
 
 // Get loads the document with the given id into out; false when absent.
-// A malformed/empty id is “not found” (mirrors the old id-coercion leniency).
+// A malformed/empty id is "not found" (mirrors the old id-coercion leniency).
 func (s *Store) Get(ctx context.Context, id string, out any) (bool, error) {
 	if id == "" {
 		return false, nil
